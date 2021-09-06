@@ -28,11 +28,16 @@ func NewKnownTasks() *KnownTasks {
 	}
 }
 
-func (m *KnownTasks) Add(jobKind string, task *Task) {
+func (m *KnownTasks) Add(jobKind string, task *Task) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	_, ok := m.tasks[jobKind]
+	if ok {
+		return ErrJobAlreadyExists
+	}
 	m.tasks[jobKind] = task
+	return nil
 }
 
 func (m *KnownTasks) Get(jobKind string) *Task {
@@ -42,12 +47,15 @@ func (m *KnownTasks) Get(jobKind string) *Task {
 	return m.tasks[jobKind]
 }
 
-// Job is the interface to be implemented by structs which represent a 'job'
-// to be performed.
+// Job represents the work to be performed.
 type Job interface {
+	// Slug returns the human readable job id.
 	Slug() string
+	// Kind returns the type of the job.
 	Kind() string
 	// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
+	// If a nil StoreTask is returned, it will be removed from the scheduler.
+	// If an error is returned it will be rescheduled with a backoff.
 	Execute(context.Context, *StoreTask) (*StoreTask, error)
 }
 
@@ -75,34 +83,44 @@ type ScheduledJob struct {
 	NextRunTime time.Time
 }
 
+// JobStore represents the store for the jobs to be executed
 type JobStore interface {
+	// Create schedule a new task
 	Create(context.Context, *StoreTask) error
+	// NextRun finds the next run time
 	NextRun(context.Context) (time.Time, error)
-	// RunAndReschedule implementation should lock the task that is ready to be executed (timed out), and asynchronously call the handler function.
-	// If it returns a StoreTask is non nil, it should update the task. If StoreTask is nil it should delete the task.
+	// Lock find and locks a the next task to be run
 	Lock(context.Context) (*StoreTask, error)
+	// Release releases the acquired lock and updates the data for the next run
 	Release(context.Context, *StoreTask) error
+	// GetSlugs gets all the slugs
 	GetSlugs(context.Context) ([]string, error)
+	// Get gets a stored task
 	Get(ctx context.Context, slug string) (*StoreTask, error)
+	// Delete deletes a stored task
 	Delete(ctx context.Context, slug string) error
+	// Clear all the tasks
 	Clear(context.Context) error
 }
 
 // A Scheduler is the Jobs orchestrator.
 // Schedulers responsible for executing Jobs when their associated Triggers fire (when their scheduled time arrives).
 type Scheduler interface {
-	RegisterJob(job Job, trigger trigger.Trigger)
-	// start the scheduler
+	// RegisterJob registers the job and trigger
+	// Fails if job already registered.
+	// If trigger is nil, the associated job will only run once.
+	RegisterJob(job Job, trigger trigger.Trigger) error
+	// Start starts the scheduler
 	Start(context.Context)
-	// schedule the job with the specified trigger
+	// ScheduleJob schedule the job with a initial payload an delay
 	ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error
-	// get keys of all of the scheduled jobs
+	// GetJobSlugs get slugs of all of the scheduled jobs
 	GetJobSlugs(context.Context) ([]string, error)
-	// get the scheduled job metadata
+	// GetScheduledJob get the scheduled job metadata
 	GetScheduledJob(ctx context.Context, slug string) (*ScheduledJob, error)
-	// remove the job from the execution queue
+	// DeleteJob remove the job from the execution queue
 	DeleteJob(ctx context.Context, slug string) error
-	// clear all the scheduled jobs
+	// Clear clear all the scheduled jobs
 	Clear(context.Context) error
 }
 
@@ -164,8 +182,8 @@ func StdSchedulerJitterOption(jitter time.Duration) StdSchedulerOption {
 	}
 }
 
-func (s *StdScheduler) RegisterJob(job Job, trigger trigger.Trigger) {
-	s.registry.Add(job.Kind(), &Task{
+func (s *StdScheduler) RegisterJob(job Job, trigger trigger.Trigger) error {
+	return s.registry.Add(job.Kind(), &Task{
 		Job:     job,
 		Trigger: trigger,
 	})

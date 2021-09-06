@@ -13,26 +13,33 @@ import (
 )
 
 func testScheduler(t *testing.T, store scheduler.JobStore) {
-	sched := scheduler.NewStdScheduler(store, scheduler.StdSchedulerMinBackoffOption(100*time.Millisecond))
+	sched := scheduler.NewStdScheduler(
+		store,
+		scheduler.StdSchedulerMinBackoffOption(100*time.Millisecond),
+		scheduler.StdSchedulerHeartbeatOption(time.Second),
+	)
 
-	shellJob := scheduler.NewShellJob("sh-good", "ls -la")
-	shellJob.Description()
+	shellJob := scheduler.NewShellJob("sh-good")
 
 	curlJob, err := scheduler.NewCurlJob("curl-good", http.MethodGet, "http://worldclockapi.com/api/json/est/now", "", nil)
 	require.NoError(t, err)
-	curlJob.Description()
 
-	errShellJob := scheduler.NewShellJob("sh-bad", "ls -z")
+	errShellJob := scheduler.NewShellJob("sh-bad")
 
 	errCurlJob, err := scheduler.NewCurlJob("curl-bad", http.MethodGet, "http://", "", nil)
 	require.NoError(t, err)
 
+	sched.RegisterJob(shellJob, trigger.NewSimpleTrigger(time.Millisecond*700))
+	sched.RegisterJob(curlJob, nil)     // since it run only once no trigger is needed
+	sched.RegisterJob(errShellJob, nil) // since it run only once no trigger is needed
+	sched.RegisterJob(errCurlJob, trigger.NewSimpleTrigger(time.Millisecond*800))
+
 	ctx, cancel := context.WithCancel(context.Background())
-	sched.ScheduleJob(ctx, shellJob, trigger.NewSimpleTrigger(time.Millisecond*700))
-	sched.ScheduleJob(ctx, curlJob, trigger.NewRunOnceTrigger(time.Millisecond))
-	sched.ScheduleJob(ctx, errShellJob, trigger.NewRunOnceTrigger(time.Millisecond))
-	sched.ScheduleJob(ctx, errCurlJob, trigger.NewSimpleTrigger(time.Millisecond*800))
 	sched.Start(ctx)
+	sched.ScheduleJob(ctx, shellJob, []byte("ls -la"), time.Millisecond*700)
+	sched.ScheduleJob(ctx, curlJob, nil, time.Millisecond)
+	sched.ScheduleJob(ctx, errShellJob, []byte("ls -z"), time.Millisecond)
+	sched.ScheduleJob(ctx, errCurlJob, nil, time.Millisecond*800)
 
 	time.Sleep(4 * time.Second)
 	scheduledJobKeys, err := sched.GetJobSlugs(ctx)

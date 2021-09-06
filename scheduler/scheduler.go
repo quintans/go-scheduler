@@ -28,35 +28,27 @@ func NewKnownTasks() *KnownTasks {
 	}
 }
 
-func (m *KnownTasks) Add(slug string, task *Task) {
+func (m *KnownTasks) Add(jobKind string, task *Task) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.tasks[slug] = task
+	m.tasks[jobKind] = task
 }
 
-func (m *KnownTasks) Get(slug string) *Task {
+func (m *KnownTasks) Get(jobKind string) *Task {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return m.tasks[slug]
-}
-
-func (m *KnownTasks) Delete(slug string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	delete(m.tasks, slug)
+	return m.tasks[jobKind]
 }
 
 // Job is the interface to be implemented by structs which represent a 'job'
 // to be performed.
 type Job interface {
 	Slug() string
+	Kind() string
 	// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-	Execute(context.Context) (string, error)
-	// Description returns a Job description.
-	Description() string
+	Execute(context.Context, *StoreTask) (*StoreTask, error)
 }
 
 type Task struct {
@@ -66,6 +58,8 @@ type Task struct {
 
 type StoreTask struct {
 	Slug    string
+	Kind    string
+	Payload []byte
 	When    int64
 	Version int64
 	Retry   int
@@ -98,10 +92,11 @@ type JobStore interface {
 // A Scheduler is the Jobs orchestrator.
 // Schedulers responsible for executing Jobs when their associated Triggers fire (when their scheduled time arrives).
 type Scheduler interface {
+	RegisterJob(job Job, trigger trigger.Trigger)
 	// start the scheduler
 	Start(context.Context)
 	// schedule the job with the specified trigger
-	ScheduleJob(ctx context.Context, job Job, trigger trigger.Trigger) error
+	ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error
 	// get keys of all of the scheduled jobs
 	GetJobSlugs(context.Context) ([]string, error)
 	// get the scheduled job metadata
@@ -122,8 +117,8 @@ type StdScheduler struct {
 	maxBackoff time.Duration
 	jitter     time.Duration
 
-	// tracks tasks
-	tasks *KnownTasks
+	// tracks registry
+	registry *KnownTasks
 }
 
 // NewStdScheduler2 returns a new DistScheduler.
@@ -134,7 +129,7 @@ func NewStdScheduler(store JobStore, options ...StdSchedulerOption) *StdSchedule
 		heartbeat:  10 * time.Second,
 		minBackoff: 10 * time.Second,
 		maxBackoff: 10 * time.Minute,
-		tasks:      NewKnownTasks(),
+		registry:   NewKnownTasks(),
 	}
 	for _, f := range options {
 		f(s)
@@ -169,25 +164,26 @@ func StdSchedulerJitterOption(jitter time.Duration) StdSchedulerOption {
 	}
 }
 
-// ScheduleJob uses the specified Trigger to schedule the Job.
-func (s *StdScheduler) ScheduleJob(ctx context.Context, job Job, trigger trigger.Trigger) error {
-	nextRunTime, err := trigger.NextFireTime(NowNano())
-	if err != nil {
-		return err
-	}
+func (s *StdScheduler) RegisterJob(job Job, trigger trigger.Trigger) {
+	s.registry.Add(job.Kind(), &Task{
+		Job:     job,
+		Trigger: trigger,
+	})
+}
 
-	err = s.store.Create(ctx, &StoreTask{
-		Slug: job.Slug(),
-		When: nextRunTime,
+// ScheduleJob uses the specified Trigger to schedule the Job.
+func (s *StdScheduler) ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error {
+	nextRunTime := NowNano() + delay.Nanoseconds()
+	err := s.store.Create(ctx, &StoreTask{
+		Slug:    job.Slug(),
+		Kind:    job.Kind(),
+		Payload: payload,
+		When:    nextRunTime,
 	})
 	if err != nil && !errors.Is(err, ErrJobAlreadyScheduled) {
 		return err
 	}
 
-	s.tasks.Add(job.Slug(), &Task{
-		Job:     job,
-		Trigger: trigger,
-	})
 	s.reset()
 
 	return nil
@@ -215,7 +211,7 @@ func (s *StdScheduler) GetScheduledJob(ctx context.Context, slug string) (*Sched
 		return nil, err
 	}
 
-	task := s.tasks.Get(storedTask.Slug)
+	task := s.registry.Get(storedTask.Kind)
 	return &ScheduledJob{
 		Job:                task.Job,
 		TriggerDescription: task.Trigger.Description(),
@@ -229,7 +225,6 @@ func (s *StdScheduler) DeleteJob(ctx context.Context, slug string) error {
 	if err != nil {
 		return err
 	}
-	s.tasks.Delete(slug)
 	s.reset()
 
 	return nil
@@ -295,7 +290,7 @@ func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	task := s.tasks.Get(st.Slug)
+	task := s.registry.Get(st.Kind)
 	if task == nil {
 		return s.store.Delete(ctx, st.Slug)
 	}
@@ -321,9 +316,8 @@ func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
 }
 
 func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *StoreTask) *StoreTask {
-	var nextRunTime int64
 	// execute the Job
-	result, err := task.Job.Execute(ctx)
+	storeTask2, err := task.Job.Execute(ctx, storeTask)
 	if err != nil {
 		storeTask.Result = err.Error()
 		storeTask.Retry++
@@ -331,22 +325,24 @@ func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *St
 		if backoff > s.maxBackoff.Nanoseconds() {
 			backoff = s.maxBackoff.Nanoseconds()
 		}
-		nextRunTime = NowNano() + backoff
 		log.Printf("failed to execute task '%s'. Backoff %s: %+v", storeTask.Slug, time.Duration(backoff), err)
-	} else {
-		storeTask.Retry = 0
-		storeTask.Result = result
-		// reschedule the Job
-		nextRunTime, err = task.Trigger.NextFireTime(storeTask.When)
-		if err != nil {
-			// will cause this to be removed from the job queue
-			return nil
-		}
+		storeTask.When = NowNano() + backoff
+		return storeTask
 	}
 
-	storeTask.When = nextRunTime
+	storeTask2.Retry = 0
+	// reschedule the Job
+	if task.Trigger == nil {
+		// will cause this to be removed from the job queue
+		return nil
+	}
+	storeTask2.When, err = task.Trigger.NextFireTime(storeTask2.When)
+	if err != nil {
+		// will cause this to be removed from the job queue
+		return nil
+	}
 
-	return storeTask
+	return storeTask2
 }
 
 func (s *StdScheduler) reset() {

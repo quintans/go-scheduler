@@ -61,6 +61,15 @@ func (ct *CronTrigger) NextFireTime(prev int64) (int64, error) {
 	return parser.nextTime(prev, ct.fields)
 }
 
+func (ct *CronTrigger) FirstDelay() (time.Duration, error) {
+	now := time.Now().UnixNano()
+	next, err := ct.NextFireTime(now)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(next - now), nil
+}
+
 // Description returns a CronTrigger description.
 func (ct *CronTrigger) Description() string {
 	return fmt.Sprintf("CronTrigger %s", ct.expression)

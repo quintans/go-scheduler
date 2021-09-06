@@ -19,7 +19,9 @@ const (
 )
 
 type PgEntry struct {
-	Slug    string    `db:"slug"`
+	Slug    string `db:"slug"`
+	Kind    string
+	Payload []byte
 	When    time.Time `db:"run_at"`
 	Version int64     `db:"version"`
 	Retry   int       `db:"retry"`
@@ -29,6 +31,8 @@ type PgEntry struct {
 func toPgEntry(t *scheduler.StoreTask) *PgEntry {
 	return &PgEntry{
 		Slug:    t.Slug,
+		Kind:    t.Kind,
+		Payload: t.Payload,
 		When:    time.Unix(0, t.When).UTC(),
 		Version: t.Version,
 		Retry:   t.Retry,
@@ -39,6 +43,8 @@ func toPgEntry(t *scheduler.StoreTask) *PgEntry {
 func fromPgEntry(t *PgEntry) *scheduler.StoreTask {
 	return &scheduler.StoreTask{
 		Slug:    t.Slug,
+		Kind:    t.Kind,
+		Payload: t.Payload,
 		When:    t.When.UnixNano(),
 		Version: t.Version,
 		Retry:   t.Retry,
@@ -61,7 +67,12 @@ func NewPgStore(db *sql.DB) *PgStore {
 
 func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toPgEntry(task)
-	_, err := s.db.NamedExecContext(ctx, "INSERT INTO schedules (slug, run_at, version, retry, result, locked_until) VALUES (:slug, :run_at, :version, :retry, :result, NULL)", entry)
+	_, err := s.db.NamedExecContext(
+		ctx,
+		`INSERT INTO schedules (slug, kind, payload, run_at, version, retry, result, locked_until) 
+		VALUES (:slug, :kind, :payload, :run_at, :version, :retry, :result, NULL)`,
+		entry,
+	)
 	if err == nil {
 		return nil
 	}
@@ -114,7 +125,7 @@ func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx) (*PgEntry, error) {
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING slug, run_at, version, retry, result`,
+		RETURNING slug, kind, payload, run_at, version, retry, result`,
 		lockUntil, now, now)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, scheduler.ErrJobNotFound
@@ -140,7 +151,7 @@ func (s *PgStore) Release(ctx context.Context, task *scheduler.StoreTask) error 
 	entry := toPgEntry(task)
 	res, err := s.db.NamedExecContext(ctx,
 		`UPDATE schedules
-		SET run_at = :run_at, version = version + 1, retry = :retry, result = :result, locked_until = NULL
+		SET payload = :payload, run_at = :run_at, version = version + 1, retry = :retry, result = :result, locked_until = NULL
 		WHERE slug = :slug AND version = :version`,
 		entry)
 	if err != nil {
@@ -170,7 +181,7 @@ func (s *PgStore) GetSlugs(ctx context.Context) ([]string, error) {
 
 func (s *PgStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
 	entry := &PgEntry{}
-	err := s.db.GetContext(ctx, entry, "SELECT slug, run_at, version, retry, result FROM schedules WHERE slug = $1", slug)
+	err := s.db.GetContext(ctx, entry, "SELECT slug, kind, payload, run_at, version, retry, result FROM schedules WHERE slug = $1", slug)
 	if err == nil {
 		return fromPgEntry(entry), nil
 	}

@@ -70,11 +70,6 @@ func (ct *CronTrigger) FirstDelay() (time.Duration, error) {
 	return next.Sub(now), nil
 }
 
-// Description returns a CronTrigger description.
-func (ct *CronTrigger) Description() string {
-	return fmt.Sprintf("CronTrigger %s", ct.expression)
-}
-
 // CronExpressionParser parses cron expressions.
 type CronExpressionParser struct {
 	minuteBump bool

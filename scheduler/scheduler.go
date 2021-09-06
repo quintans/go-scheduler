@@ -71,9 +71,8 @@ func (s StoreTask) IsOK() bool {
 }
 
 type ScheduledJob struct {
-	Job                Job
-	TriggerDescription string
-	NextRunTime        time.Time
+	Job         Job
+	NextRunTime time.Time
 }
 
 type JobStore interface {
@@ -214,9 +213,8 @@ func (s *StdScheduler) GetScheduledJob(ctx context.Context, slug string) (*Sched
 
 	task := s.registry.Get(storedTask.Kind)
 	return &ScheduledJob{
-		Job:                task.Job,
-		TriggerDescription: task.Trigger.Description(),
-		NextRunTime:        storedTask.When,
+		Job:         task.Job,
+		NextRunTime: storedTask.When,
 	}, nil
 }
 

@@ -53,9 +53,8 @@ func demoScheduler(wg *sync.WaitGroup) {
 
 	time.Sleep(time.Second * 10)
 
-	j, err := sched.GetScheduledJob(ctx, cronJob.Slug())
+	_, err = sched.GetScheduledJob(ctx, cronJob.Slug())
 	mustNoError(err)
-	fmt.Println(j.TriggerDescription)
 	slugs, err := sched.GetJobSlugs(ctx)
 	mustNoError(err)
 	fmt.Println("Before delete: ", slugs)

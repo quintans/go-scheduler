@@ -13,7 +13,7 @@ var ErrExpired = errors.New("trigger has expired")
 type Trigger interface {
 
 	// NextFireTime returns the next time at which the Trigger is scheduled to fire.
-	NextFireTime(prev int64) (int64, error)
+	NextFireTime(prev time.Time) (time.Time, error)
 
 	// Description returns a Trigger description.
 	Description() string
@@ -30,9 +30,8 @@ func NewSimpleTrigger(interval time.Duration) *SimpleTrigger {
 }
 
 // NextFireTime returns the next time at which the SimpleTrigger is scheduled to fire.
-func (st *SimpleTrigger) NextFireTime(prev int64) (int64, error) {
-	next := prev + st.Interval.Nanoseconds()
-	return next, nil
+func (st *SimpleTrigger) NextFireTime(prev time.Time) (time.Time, error) {
+	return prev.Add(st.Interval), nil
 }
 
 // Description returns a SimpleTrigger description.
@@ -53,14 +52,14 @@ func NewRunOnceTrigger(delay time.Duration) *RunOnceTrigger {
 
 // NextFireTime returns the next time at which the RunOnceTrigger is scheduled to fire.
 // Sets expired to true afterwards.
-func (st *RunOnceTrigger) NextFireTime(prev int64) (int64, error) {
+func (st *RunOnceTrigger) NextFireTime(prev time.Time) (time.Time, error) {
 	if !st.expired {
-		next := prev + st.Delay.Nanoseconds()
+		next := prev.Add(st.Delay)
 		st.expired = true
 		return next, nil
 	}
 
-	return 0, ErrExpired
+	return time.Time{}, ErrExpired
 }
 
 // Description returns a RunOnceTrigger description.

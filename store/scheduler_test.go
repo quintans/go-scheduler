@@ -15,7 +15,7 @@ import (
 func testScheduler(t *testing.T, store scheduler.JobStore) {
 	sched := scheduler.NewStdScheduler(
 		store,
-		scheduler.StdSchedulerMinBackoffOption(100*time.Millisecond),
+		scheduler.StdSchedulerIncBackoffOption(100*time.Millisecond),
 		scheduler.StdSchedulerHeartbeatOption(time.Second),
 	)
 

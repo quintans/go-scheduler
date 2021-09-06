@@ -33,7 +33,7 @@ func toPgEntry(t *scheduler.StoreTask) *PgEntry {
 		Slug:    t.Slug,
 		Kind:    t.Kind,
 		Payload: t.Payload,
-		When:    time.Unix(0, t.When).UTC(),
+		When:    t.When.UTC(),
 		Version: t.Version,
 		Retry:   t.Retry,
 		Result:  t.Result,
@@ -45,7 +45,7 @@ func fromPgEntry(t *PgEntry) *scheduler.StoreTask {
 		Slug:    t.Slug,
 		Kind:    t.Kind,
 		Payload: t.Payload,
-		When:    t.When.UnixNano(),
+		When:    t.When.UTC(),
 		Version: t.Version,
 		Retry:   t.Retry,
 		Result:  t.Result,
@@ -85,18 +85,18 @@ func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 }
 
 // NextRun returns the next available run
-func (s *PgStore) NextRun(ctx context.Context) (int64, error) {
+func (s *PgStore) NextRun(ctx context.Context) (time.Time, error) {
 	var runAt time.Time
 	now := time.Now().UTC()
 	err := s.db.GetContext(ctx, &runAt, "SELECT run_at FROM schedules WHERE locked_until IS NULL OR locked_until < $1 ORDER BY run_at ASC LIMIT 1", now)
 	if err == nil {
-		return runAt.UnixNano(), nil
+		return runAt.UTC(), nil
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, scheduler.ErrJobNotFound
+		return time.Time{}, scheduler.ErrJobNotFound
 	}
 
-	return 0, fmt.Errorf("failed selecting next run: %w", err)
+	return time.Time{}, fmt.Errorf("failed selecting next run: %w", err)
 }
 
 func (s *PgStore) Lock(ctx context.Context) (*scheduler.StoreTask, error) {

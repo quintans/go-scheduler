@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/quintans/go-scheduler/scheduler"
 )
@@ -35,12 +36,12 @@ func (s *MemStore) Create(_ context.Context, task *scheduler.StoreTask) error {
 	return nil
 }
 
-func (s *MemStore) NextRun(context.Context) (int64, error) {
+func (s *MemStore) NextRun(context.Context) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.queue.Len() == 0 {
-		return 0, scheduler.ErrJobNotFound
+		return time.Time{}, scheduler.ErrJobNotFound
 	}
 
 	ts := s.queue.Head().When
@@ -156,7 +157,7 @@ func (pq PriorityQueue) Len() int { return len(pq) }
 
 // Less is the items less comparator.
 func (pq PriorityQueue) Less(i, j int) bool {
-	return pq[i].When < pq[j].When
+	return pq[i].When.Before(pq[j].When)
 }
 
 // Swap exchanges the indexes of the items.

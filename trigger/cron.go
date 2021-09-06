@@ -56,18 +56,18 @@ func NewCronTrigger(expr string) (*CronTrigger, error) {
 }
 
 // NextFireTime returns the next time at which the CronTrigger is scheduled to fire.
-func (ct *CronTrigger) NextFireTime(prev int64) (int64, error) {
+func (ct *CronTrigger) NextFireTime(prev time.Time) (time.Time, error) {
 	parser := NewCronExpressionParser(ct.lastDefined)
 	return parser.nextTime(prev, ct.fields)
 }
 
 func (ct *CronTrigger) FirstDelay() (time.Duration, error) {
-	now := time.Now().UnixNano()
+	now := time.Now()
 	next, err := ct.NextFireTime(now)
 	if err != nil {
 		return 0, err
 	}
-	return time.Duration(next - now), nil
+	return next.Sub(now), nil
 }
 
 // Description returns a CronTrigger description.
@@ -141,7 +141,7 @@ const (
 	yearIndex
 )
 
-func (parser *CronExpressionParser) nextTime(prev int64, fields []*CronField) (nextTime int64, err error) {
+func (parser *CronExpressionParser) nextTime(prev time.Time, fields []*CronField) (nextTime time.Time, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			switch x := r.(type) {
@@ -150,12 +150,12 @@ func (parser *CronExpressionParser) nextTime(prev int64, fields []*CronField) (n
 			case error:
 				err = x
 			default:
-				err = errors.New("Unknown cron expression error")
+				err = errors.New("unknown cron expression error")
 			}
 		}
 	}()
 
-	tfmt := time.Unix(prev/int64(time.Second), 0).UTC().Format(readDateLayout)
+	tfmt := time.Unix(prev.Unix(), 0).UTC().Format(readDateLayout)
 	ttok := strings.Split(strings.Replace(tfmt, "  ", " ", 1), " ")
 	hms := strings.Split(ttok[3], ":")
 	parser.maxDays = maxDays(intVal(months, ttok[1]), atoi(ttok[4]))
@@ -169,8 +169,7 @@ func (parser *CronExpressionParser) nextTime(prev int64, fields []*CronField) (n
 
 	nstr := fmt.Sprintf("%s %s %s:%s:%s %s", month, strconv.Itoa(dayOfMonth),
 		hour, minute, second, year)
-	ntime, err := time.Parse(writeDateLayout, nstr)
-	nextTime = ntime.UnixNano()
+	nextTime, err = time.Parse(writeDateLayout, nstr)
 	return
 }
 

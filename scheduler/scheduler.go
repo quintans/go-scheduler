@@ -60,7 +60,7 @@ type StoreTask struct {
 	Slug    string
 	Kind    string
 	Payload []byte
-	When    int64
+	When    time.Time
 	Version int64
 	Retry   int
 	Result  string
@@ -73,12 +73,12 @@ func (s StoreTask) IsOK() bool {
 type ScheduledJob struct {
 	Job                Job
 	TriggerDescription string
-	NextRunTime        int64
+	NextRunTime        time.Time
 }
 
 type JobStore interface {
 	Create(context.Context, *StoreTask) error
-	NextRun(context.Context) (int64, error)
+	NextRun(context.Context) (time.Time, error)
 	// RunAndReschedule implementation should lock the task that is ready to be executed (timed out), and asynchronously call the handler function.
 	// If it returns a StoreTask is non nil, it should update the task. If StoreTask is nil it should delete the task.
 	Lock(context.Context) (*StoreTask, error)
@@ -113,9 +113,10 @@ type StdScheduler struct {
 	store      JobStore
 	interrupt  chan interface{}
 	heartbeat  time.Duration
-	minBackoff time.Duration
+	incBackoff time.Duration
 	maxBackoff time.Duration
-	jitter     time.Duration
+	// to avoid concurrent instances to colide when locking we can add some randomness
+	jitter time.Duration
 
 	// tracks registry
 	registry *KnownTasks
@@ -127,7 +128,7 @@ func NewStdScheduler(store JobStore, options ...StdSchedulerOption) *StdSchedule
 		store:      store,
 		interrupt:  make(chan interface{}),
 		heartbeat:  10 * time.Second,
-		minBackoff: 10 * time.Second,
+		incBackoff: 10 * time.Second,
 		maxBackoff: 10 * time.Minute,
 		registry:   NewKnownTasks(),
 	}
@@ -146,9 +147,9 @@ func StdSchedulerHeartbeatOption(heartbeat time.Duration) StdSchedulerOption {
 	}
 }
 
-func StdSchedulerMinBackoffOption(backoff time.Duration) StdSchedulerOption {
+func StdSchedulerIncBackoffOption(backoff time.Duration) StdSchedulerOption {
 	return func(s *StdScheduler) {
-		s.minBackoff = backoff
+		s.incBackoff = backoff
 	}
 }
 
@@ -173,7 +174,7 @@ func (s *StdScheduler) RegisterJob(job Job, trigger trigger.Trigger) {
 
 // ScheduleJob uses the specified Trigger to schedule the Job.
 func (s *StdScheduler) ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error {
-	nextRunTime := NowNano() + delay.Nanoseconds()
+	nextRunTime := time.Now().Add(delay)
 	err := s.store.Create(ctx, &StoreTask{
 		Slug:    job.Slug(),
 		Kind:    job.Kind(),
@@ -273,15 +274,15 @@ func (s *StdScheduler) calculateNextRun(ctx context.Context) (*time.Timer, error
 	if err != nil && !errors.Is(err, ErrJobNotFound) {
 		return nil, err
 	}
-	if ts == 0 {
+	if (ts == time.Time{}) {
 		return nil, nil
 	}
 
 	park := parkTime(ts)
 	if s.jitter > 0 {
-		park += rand.Int63n(int64(s.jitter))
+		park = time.Duration(int64(park) + rand.Int63n(int64(s.jitter)))
 	}
-	return time.NewTimer(time.Duration(park)), nil
+	return time.NewTimer(park), nil
 }
 
 func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
@@ -321,12 +322,20 @@ func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *St
 	if err != nil {
 		storeTask.Result = err.Error()
 		storeTask.Retry++
-		backoff := int64(storeTask.Retry) * int64(s.minBackoff)
-		if backoff > s.maxBackoff.Nanoseconds() {
-			backoff = s.maxBackoff.Nanoseconds()
+
+		factor := int64(1)
+		var backoff int64
+		for i := 1; i <= storeTask.Retry; i++ {
+			backoff = factor * int64(s.incBackoff)
+			if backoff > s.maxBackoff.Nanoseconds() {
+				backoff = s.maxBackoff.Nanoseconds()
+				break
+			}
+			factor = factor * 2
 		}
-		log.Printf("failed to execute task '%s'. Backoff %s: %+v", storeTask.Slug, time.Duration(backoff), err)
-		storeTask.When = NowNano() + backoff
+		delay := time.Duration(backoff)
+		log.Printf("failed to execute task '%s'. Backoff %s: %+v", storeTask.Slug, delay, err)
+		storeTask.When = time.Now().Add(delay)
 		return storeTask
 	}
 
@@ -365,15 +374,10 @@ func (s *StdScheduler) startHeartbeat(ctx context.Context) {
 	}
 }
 
-func parkTime(ts int64) int64 {
-	now := NowNano()
-	if ts > now {
-		return ts - now
+func parkTime(ts time.Time) time.Duration {
+	now := time.Now()
+	if ts.After(now) {
+		return ts.Sub(now)
 	}
 	return 0
-}
-
-// NowNano returns the current UTC Unix time in nanoseconds.
-func NowNano() int64 {
-	return time.Now().UTC().UnixNano()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 var (
 	ErrJobNotFound         = errors.New("no job with the given Slug was found")
 	ErrJobAlreadyScheduled = errors.New("job already scheduled")
+	ErrJobAlreadyExists    = errors.New("job already exists")
 )
 
 type KnownTasks struct {
@@ -66,7 +68,7 @@ type StoreTask struct {
 	Slug    string
 	When    int64
 	Version int64
-	Retry   int64
+	Retry   int
 	Result  string
 }
 
@@ -85,7 +87,8 @@ type JobStore interface {
 	NextRun(context.Context) (int64, error)
 	// RunAndReschedule implementation should lock the task that is ready to be executed (timed out), and asynchronously call the handler function.
 	// If it returns a StoreTask is non nil, it should update the task. If StoreTask is nil it should delete the task.
-	RunAndReschedule(ctx context.Context, fn func(ctx context.Context, task *StoreTask) *StoreTask) error
+	Lock(context.Context) (*StoreTask, error)
+	Release(context.Context, *StoreTask) error
 	GetSlugs(context.Context) ([]string, error)
 	Get(ctx context.Context, slug string) (*StoreTask, error)
 	Delete(ctx context.Context, slug string) error
@@ -117,6 +120,7 @@ type StdScheduler struct {
 	heartbeat  time.Duration
 	minBackoff time.Duration
 	maxBackoff time.Duration
+	jitter     time.Duration
 
 	// tracks tasks
 	tasks *KnownTasks
@@ -156,6 +160,12 @@ func StdSchedulerMinBackoffOption(backoff time.Duration) StdSchedulerOption {
 func StdSchedulerMaxBackoffOption(backoff time.Duration) StdSchedulerOption {
 	return func(s *StdScheduler) {
 		s.maxBackoff = backoff
+	}
+}
+
+func StdSchedulerJitterOption(jitter time.Duration) StdSchedulerOption {
+	return func(s *StdScheduler) {
+		s.jitter = jitter
 	}
 }
 
@@ -247,7 +257,10 @@ func (s *StdScheduler) startExecutionLoop(ctx context.Context) {
 		} else {
 			select {
 			case <-run.C:
-				s.executeAndReschedule(ctx)
+				err := s.executeAndReschedule(ctx)
+				if err != nil {
+					log.Printf("failed to execute and reschedule task: %+v", err)
+				}
 			case <-s.interrupt:
 				run.Stop()
 				continue
@@ -262,31 +275,49 @@ func (s *StdScheduler) startExecutionLoop(ctx context.Context) {
 
 func (s *StdScheduler) calculateNextRun(ctx context.Context) (*time.Timer, error) {
 	ts, err := s.store.NextRun(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrJobNotFound) {
 		return nil, err
 	}
 	if ts == 0 {
 		return nil, nil
 	}
-	return time.NewTimer(time.Duration(parkTime(ts))), nil
+
+	park := parkTime(ts)
+	if s.jitter > 0 {
+		park += rand.Int63n(int64(s.jitter))
+	}
+	return time.NewTimer(time.Duration(park)), nil
 }
 
-func (s *StdScheduler) executeAndReschedule(ctx context.Context) {
+func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
+	st, err := s.store.Lock(ctx)
+	s.reset()
+	if err != nil {
+		return err
+	}
+	task := s.tasks.Get(st.Slug)
+	if task == nil {
+		return s.store.Delete(ctx, st.Slug)
+	}
+
 	go func() {
-		defer s.reset()
-		err := s.store.RunAndReschedule(ctx, func(ctx context.Context, storeTask *StoreTask) *StoreTask {
-			task := s.tasks.Get(storeTask.Slug)
-			var st *StoreTask
-			if task != nil {
-				st = s.executeTask(ctx, *task, storeTask)
+		slug := st.Slug
+		st := s.executeTask(ctx, *task, st)
+		if st == nil {
+			err := s.store.Delete(ctx, slug)
+			if err != nil {
+				log.Printf("failed to delete task '%s': %+v", slug, err)
 			}
-			return st
-		})
+			return
+		}
+		err := s.store.Release(ctx, st)
 		if err != nil {
-			log.Printf("failed to RunAndReschedule a task: %+v", err)
+			log.Printf("failed to release task '%s': %+v", slug, err)
 			return
 		}
 	}()
+
+	return nil
 }
 
 func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *StoreTask) *StoreTask {
@@ -296,12 +327,12 @@ func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *St
 	if err != nil {
 		storeTask.Result = err.Error()
 		storeTask.Retry++
-		backoff := storeTask.Retry * int64(s.minBackoff)
+		backoff := int64(storeTask.Retry) * int64(s.minBackoff)
 		if backoff > s.maxBackoff.Nanoseconds() {
 			backoff = s.maxBackoff.Nanoseconds()
 		}
 		nextRunTime = NowNano() + backoff
-		log.Printf("failed to execute task %s. Backoff %s: %+v", storeTask.Slug, time.Duration(backoff), err)
+		log.Printf("failed to execute task '%s'. Backoff %s: %+v", storeTask.Slug, time.Duration(backoff), err)
 	} else {
 		storeTask.Retry = 0
 		storeTask.Result = result

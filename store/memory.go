@@ -14,13 +14,13 @@ import (
 type MemStore struct {
 	mu     sync.Mutex
 	queue  *PriorityQueue
-	locked map[string]*Item
+	locked map[string]*MemEntry
 }
 
 func NewMemStore() *MemStore {
 	return &MemStore{
 		queue:  &PriorityQueue{},
-		locked: map[string]*Item{},
+		locked: map[string]*MemEntry{},
 	}
 }
 
@@ -28,7 +28,7 @@ func (s *MemStore) Create(_ context.Context, task *scheduler.StoreTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	heap.Push(s.queue, &Item{
+	heap.Push(s.queue, &MemEntry{
 		StoreTask: task,
 	})
 
@@ -40,7 +40,7 @@ func (s *MemStore) NextRun(context.Context) (int64, error) {
 	defer s.mu.Unlock()
 
 	if s.queue.Len() == 0 {
-		return 0, nil
+		return 0, scheduler.ErrJobNotFound
 	}
 
 	ts := s.queue.Head().When
@@ -48,46 +48,35 @@ func (s *MemStore) NextRun(context.Context) (int64, error) {
 	return ts, nil
 }
 
-func (s *MemStore) RunAndReschedule(ctx context.Context, fn func(ctx context.Context, task *scheduler.StoreTask) *scheduler.StoreTask) error {
-	item := s.lock()
-	if item == nil {
-		return nil
-	}
-
-	task := fn(ctx, item.StoreTask)
-	if task == nil {
-		s.Delete(ctx, item.Slug)
-		return nil
-	}
-	task.Version++
-	item.StoreTask = task
-	s.release(item)
-
-	return nil
-}
-
-func (s *MemStore) lock() *Item {
+func (s *MemStore) Lock(context.Context) (*scheduler.StoreTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.queue.Len() == 0 {
-		return nil
+		return nil, scheduler.ErrJobNotFound
 	}
 
 	// Lock by popping.
 	// Since this is in memory, we assume that this is being called when the timer has expired.
-	item := heap.Pop(s.queue).(*Item)
-	s.locked[item.Slug] = item
+	entry := heap.Pop(s.queue).(*MemEntry)
+	s.locked[entry.Slug] = entry
 
-	return item
+	return entry.StoreTask, nil
 }
 
-func (s *MemStore) release(item *Item) {
+func (s *MemStore) Release(ctx context.Context, task *scheduler.StoreTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.locked, item.Slug)
-	heap.Push(s.queue, item)
+	entry, ok := s.locked[task.Slug]
+	if ok {
+		delete(s.locked, task.Slug)
+		task.Version++
+		entry.StoreTask = task
+		heap.Push(s.queue, entry)
+		return nil
+	}
+	return scheduler.ErrJobNotFound
 }
 
 func (s *MemStore) GetSlugs(context.Context) ([]string, error) {
@@ -95,8 +84,8 @@ func (s *MemStore) GetSlugs(context.Context) ([]string, error) {
 	defer s.mu.Unlock()
 
 	slugs := make([]string, 0, s.queue.Len()+len(s.locked))
-	for _, item := range *s.queue {
-		slugs = append(slugs, item.Slug)
+	for _, entry := range *s.queue {
+		slugs = append(slugs, entry.Slug)
 	}
 
 	for k := range s.locked {
@@ -110,14 +99,14 @@ func (s *MemStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, item := range *s.queue {
-		if item.Slug == slug {
-			return item.StoreTask, nil
+	for _, entry := range *s.queue {
+		if entry.Slug == slug {
+			return entry.StoreTask, nil
 		}
 	}
-	for _, item := range s.locked {
-		if item.Slug == slug {
-			return item.StoreTask, nil
+	for _, entry := range s.locked {
+		if entry.Slug == slug {
+			return entry.StoreTask, nil
 		}
 	}
 
@@ -128,8 +117,8 @@ func (s *MemStore) Delete(ctx context.Context, slug string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for i, item := range *s.queue {
-		if item.Slug == slug {
+	for i, entry := range *s.queue {
+		if entry.Slug == slug {
 			s.queue.Remove(i)
 			return nil
 		}
@@ -149,18 +138,18 @@ func (s *MemStore) Clear(context.Context) error {
 	defer s.mu.Unlock()
 
 	s.queue = &PriorityQueue{}
-	s.locked = map[string]*Item{}
+	s.locked = map[string]*MemEntry{}
 
 	return nil
 }
 
-type Item struct {
+type MemEntry struct {
 	*scheduler.StoreTask
 	index int
 }
 
 // PriorityQueue implements the heap.Interface.
-type PriorityQueue []*Item
+type PriorityQueue []*MemEntry
 
 // Len returns the PriorityQueue length.
 func (pq PriorityQueue) Len() int { return len(pq) }
@@ -181,9 +170,9 @@ func (pq PriorityQueue) Swap(i, j int) {
 // Adds x as element Len().
 func (pq *PriorityQueue) Push(x interface{}) {
 	n := len(*pq)
-	item := x.(*Item)
-	item.index = n
-	*pq = append(*pq, item)
+	entry := x.(*MemEntry)
+	entry.index = n
+	*pq = append(*pq, entry)
 }
 
 // Pop implements the heap.Interface.Pop.
@@ -191,18 +180,18 @@ func (pq *PriorityQueue) Push(x interface{}) {
 func (pq *PriorityQueue) Pop() interface{} {
 	old := *pq
 	n := len(old)
-	item := old[n-1]
-	item.index = -1 // for safety
+	entry := old[n-1]
+	entry.index = -1 // for safety
 	*pq = old[0 : n-1]
-	return item
+	return entry
 }
 
-// Head returns the first item of a PriorityQueue without removing it.
-func (pq *PriorityQueue) Head() *Item {
+// Head returns the first entry of a PriorityQueue without removing it.
+func (pq *PriorityQueue) Head() *MemEntry {
 	return (*pq)[0]
 }
 
 // Remove removes and returns the element at index i from the PriorityQueue.
-func (pq *PriorityQueue) Remove(i int) *Item {
-	return heap.Remove(pq, i).(*Item)
+func (pq *PriorityQueue) Remove(i int) *MemEntry {
+	return heap.Remove(pq, i).(*MemEntry)
 }

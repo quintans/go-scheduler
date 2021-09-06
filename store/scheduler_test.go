@@ -1,4 +1,4 @@
-package scheduler_test
+package store_test
 
 import (
 	"context"
@@ -8,13 +8,11 @@ import (
 	"time"
 
 	"github.com/quintans/go-scheduler/scheduler"
-	"github.com/quintans/go-scheduler/store"
 	"github.com/quintans/go-scheduler/trigger"
 	"github.com/stretchr/testify/require"
 )
 
-func TestScheduler(t *testing.T) {
-	store := store.NewMemStore()
+func testScheduler(t *testing.T, store scheduler.JobStore) {
 	sched := scheduler.NewStdScheduler(store, scheduler.StdSchedulerMinBackoffOption(100*time.Millisecond))
 
 	shellJob := scheduler.NewShellJob("sh-good", "ls -la")
@@ -30,13 +28,13 @@ func TestScheduler(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sched.Start(ctx)
 	sched.ScheduleJob(ctx, shellJob, trigger.NewSimpleTrigger(time.Millisecond*700))
-	sched.ScheduleJob(ctx, curlJob, trigger.NewRunOnceTrigger(time.Millisecond*100))
-	sched.ScheduleJob(ctx, errShellJob, trigger.NewRunOnceTrigger(time.Millisecond*100))
+	sched.ScheduleJob(ctx, curlJob, trigger.NewRunOnceTrigger(time.Millisecond))
+	sched.ScheduleJob(ctx, errShellJob, trigger.NewRunOnceTrigger(time.Millisecond))
 	sched.ScheduleJob(ctx, errCurlJob, trigger.NewSimpleTrigger(time.Millisecond*800))
+	sched.Start(ctx)
 
-	time.Sleep(time.Second)
+	time.Sleep(4 * time.Second)
 	scheduledJobKeys, err := sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"sh-bad", "curl-bad", "sh-good"}, scheduledJobKeys)

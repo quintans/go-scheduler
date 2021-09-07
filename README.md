@@ -73,7 +73,7 @@ type Scheduler interface {
 Available implementations:
 - StdScheduler
 
-### Job interface
+### JobStore interface
 where to store job tasks
 
 ```go

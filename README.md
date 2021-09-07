@@ -28,6 +28,8 @@ Implemented examples:
 - ShellJob
 - CurlJob
 
+> These exists for demonstration purposes only
+
 ### Trigger interface
 
 responsible to compute the next run time
@@ -40,7 +42,7 @@ type Trigger interface {
 }
 ```
 
-Implemented examples:
+Available implementations:
 - CronTrigger
 - SimpleTrigger
 
@@ -68,7 +70,7 @@ type Scheduler interface {
 }
 ```
 
-Implemented examples:
+Available implementations:
 - StdScheduler
 
 ### Job interface
@@ -96,7 +98,7 @@ type JobStore interface {
 }
 ```
 
-Implemented examples:
+Available implementations:
 - MemStore
 - PgStore
 
@@ -107,14 +109,20 @@ Implemented examples:
     sched := scheduler.NewStdScheduler(store)
 
     cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")
-    shellJob := scheduler.NewShellJob("list-all")
+    curlJob, err := scheduler.NewCurlJob(
+        "curl-clock", 
+        http.MethodGet, 
+        "http://worldclockapi.com/api/json/est/now", 
+        "", 
+        nil,
+    )
 
-    sched.RegisterJob(shellJob, cronTrigger)
+    sched.RegisterJob(curlJob, cronTrigger)
 
     ctx, cancel := context.WithCancel(context.Background())
     sched.Start(ctx)
     delay, _ := cronTrigger.FirstDelay()
-    sched.ScheduleJob(ctx, shellJob, []byte("ls -la"), delay)
+    sched.ScheduleJob(ctx, curlJob, nil, delay)
     time.Sleep(time.Second * 2)
     cancel()
 ```

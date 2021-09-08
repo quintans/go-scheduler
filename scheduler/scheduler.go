@@ -49,8 +49,6 @@ func (m *KnownTasks) Get(jobKind string) *Task {
 
 // Job represents the work to be performed.
 type Job interface {
-	// Slug returns the human readable job id.
-	Slug() string
 	// Kind returns the type of the job.
 	Kind() string
 	// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
@@ -113,7 +111,7 @@ type Scheduler interface {
 	// Start starts the scheduler
 	Start(context.Context)
 	// ScheduleJob schedule the job with a initial payload an delay
-	ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error
+	ScheduleJob(ctx context.Context, slug string, job Job, payload []byte, delay time.Duration) error
 	// GetJobSlugs get slugs of all of the scheduled jobs
 	GetJobSlugs(context.Context) ([]string, error)
 	// GetScheduledJob get the scheduled job metadata
@@ -190,10 +188,10 @@ func (s *StdScheduler) RegisterJob(job Job, trigger trigger.Trigger) error {
 }
 
 // ScheduleJob uses the specified Trigger to schedule the Job.
-func (s *StdScheduler) ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error {
+func (s *StdScheduler) ScheduleJob(ctx context.Context, slug string, job Job, payload []byte, delay time.Duration) error {
 	nextRunTime := time.Now().Add(delay)
 	err := s.store.Create(ctx, &StoreTask{
-		Slug:    job.Slug(),
+		Slug:    slug,
 		Kind:    job.Kind(),
 		Payload: payload,
 		When:    nextRunTime,

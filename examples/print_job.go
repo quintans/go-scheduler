@@ -9,15 +9,11 @@ import (
 
 // PrintJob implements the scheduler.Job interface.
 type PrintJob struct {
-	slug string
-}
-
-func (pj PrintJob) Slug() string {
-	return pj.slug
+	kind string
 }
 
 func (pj PrintJob) Kind() string {
-	return pj.slug
+	return pj.kind
 }
 
 // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.

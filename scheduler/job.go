@@ -12,21 +12,15 @@ import (
 
 // ShellJob is the shell command Job, implements the scheduler.Job interface.
 // Consider the runtime.GOOS when sending the shell command to execute.
-type ShellJob struct {
-	slug string
-}
+type ShellJob struct{}
 
 // NewShellJob returns a new ShellJob.
-func NewShellJob(slug string) *ShellJob {
-	return &ShellJob{slug}
-}
-
-func (sh *ShellJob) Slug() string {
-	return sh.slug
+func NewShellJob() *ShellJob {
+	return &ShellJob{}
 }
 
 func (sh *ShellJob) Kind() string {
-	return sh.slug
+	return "shell"
 }
 
 // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
@@ -41,7 +35,7 @@ func (sh *ShellJob) Execute(_ context.Context, st *StoreTask) (*StoreTask, error
 
 // CurlJob is the curl command Job, implements the scheduler.Job interface.
 type CurlJob struct {
-	slug          string
+	kind          string
 	RequestMethod string
 	URL           string
 	Body          string
@@ -50,7 +44,7 @@ type CurlJob struct {
 
 // NewCurlJob returns a new CurlJob.
 func NewCurlJob(
-	slug string,
+	kind string,
 	method string,
 	url string,
 	body string,
@@ -67,7 +61,7 @@ func NewCurlJob(
 	}
 
 	return &CurlJob{
-		slug:          slug,
+		kind:          kind,
 		RequestMethod: method,
 		URL:           url,
 		Body:          body,
@@ -75,12 +69,8 @@ func NewCurlJob(
 	}, nil
 }
 
-func (cu *CurlJob) Slug() string {
-	return cu.slug
-}
-
 func (cu *CurlJob) Kind() string {
-	return cu.slug
+	return cu.kind
 }
 
 // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.

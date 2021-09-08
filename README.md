@@ -12,8 +12,6 @@ responsible to do the work
 
 ```go
 type Job interface {
-    // Slug returns the human readable job id.
-    Slug() string
     // Kind returns the type of the job.
     Kind() string
     // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
@@ -58,7 +56,7 @@ type Scheduler interface {
     // start the scheduler
     Start(context.Context)
     // schedule the job with the specified trigger
-    ScheduleJob(ctx context.Context, job Job, payload []byte, delay time.Duration) error
+    ScheduleJob(ctx context.Context, slug string, job Job, payload []byte, firstDelay time.Duration) error
     // get keys of all of the scheduled jobs
     GetJobSlugs(context.Context) ([]string, error)
     // get the scheduled job metadata
@@ -104,13 +102,15 @@ Available implementations:
 
 ## Example
 
+### Repeating
+
 ```go
     store := store.NewMemStore()
     sched := scheduler.NewStdScheduler(store)
 
     cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")
     curlJob, err := scheduler.NewCurlJob(
-        "curl-clock", 
+        "curl-clock",
         http.MethodGet, 
         "http://worldclockapi.com/api/json/est/now", 
         "", 
@@ -122,7 +122,25 @@ Available implementations:
     ctx, cancel := context.WithCancel(context.Background())
     sched.Start(ctx)
     delay, _ := cronTrigger.FirstDelay()
-    sched.ScheduleJob(ctx, curlJob, nil, delay)
+    sched.ScheduleJob(ctx, "curl-now", curlJob, nil, delay)
+    time.Sleep(time.Second * 2)
+    cancel()
+```
+
+### Once
+
+```go
+    conn = ...
+    store := store.NewPgStore(conn)
+    sched := scheduler.NewStdScheduler(store)
+
+    cancelTxJob := scheduler.NewCancelTransactionJob()
+    // nil triggers means non repeatable
+    sched.RegisterJob(cancelTxJob, nil) 
+
+    ctx, cancel := context.WithCancel(context.Background())
+    sched.Start(ctx)
+    sched.ScheduleJob(ctx, "cancel-tx", cancelTxJob, "9bfadfd6-8e62-4c58-9b6e-636d666b6643", time.Second)
     time.Sleep(time.Second * 2)
     cancel()
 ```

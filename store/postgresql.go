@@ -52,25 +52,41 @@ func fromPgEntry(t *PgEntry) *scheduler.StoreTask {
 	}
 }
 
+type PgStoreOption func(*PgStore)
+
+func TableNameOption(tableName string) PgStoreOption {
+	return func(ps *PgStore) {
+		ps.tableName = tableName
+	}
+}
+
 // PgStore is a PostgreSQL task store.
 type PgStore struct {
 	db           *sqlx.DB
 	lockDuration time.Duration
+	tableName    string
 }
 
-func NewPgStore(db *sql.DB) *PgStore {
-	return &PgStore{
+func NewPgStore(db *sql.DB, options ...PgStoreOption) *PgStore {
+	ps := &PgStore{
 		db:           sqlx.NewDb(db, driverName),
 		lockDuration: 5 * time.Minute,
+		tableName:    "schedules",
 	}
+
+	for _, o := range options {
+		o(ps)
+	}
+
+	return ps
 }
 
 func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toPgEntry(task)
 	_, err := s.db.NamedExecContext(
 		ctx,
-		`INSERT INTO schedules (slug, kind, payload, run_at, version, retry, result, locked_until) 
-		VALUES (:slug, :kind, :payload, :run_at, :version, :retry, :result, NULL)`,
+		fmt.Sprintf(`INSERT INTO %s (slug, kind, payload, run_at, version, retry, result, locked_until)
+		VALUES (:slug, :kind, :payload, :run_at, :version, :retry, :result, NULL)`, s.tableName),
 		entry,
 	)
 	if err == nil {
@@ -88,7 +104,7 @@ func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 func (s *PgStore) NextRun(ctx context.Context) (time.Time, error) {
 	var runAt time.Time
 	now := time.Now().UTC()
-	err := s.db.GetContext(ctx, &runAt, "SELECT run_at FROM schedules WHERE locked_until IS NULL OR locked_until < $1 ORDER BY run_at ASC LIMIT 1", now)
+	err := s.db.GetContext(ctx, &runAt, fmt.Sprintf("SELECT run_at FROM %s WHERE locked_until IS NULL OR locked_until < $1 ORDER BY run_at ASC LIMIT 1", s.tableName), now)
 	if err == nil {
 		return runAt.UTC(), nil
 	}
@@ -116,16 +132,16 @@ func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx) (*PgEntry, error) {
 	now := time.Now().UTC()
 	lockUntil := now.Add(s.lockDuration)
 	res, err := t.QueryxContext(ctx,
-		`UPDATE schedules SET locked_until = $1, version = version + 1
+		fmt.Sprintf(`UPDATE %s SET locked_until = $1, version = version + 1
 		WHERE slug = (
 			SELECT slug
-			FROM schedules
+			FROM %s
 			WHERE run_at < $2 AND locked_until IS NULL OR locked_until < $3
 			ORDER BY run_at ASC 
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING slug, kind, payload, run_at, version, retry, result`,
+		RETURNING slug, kind, payload, run_at, version, retry, result`, s.tableName, s.tableName),
 		lockUntil, now, now)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, scheduler.ErrJobNotFound
@@ -150,9 +166,9 @@ func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx) (*PgEntry, error) {
 func (s *PgStore) Release(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toPgEntry(task)
 	res, err := s.db.NamedExecContext(ctx,
-		`UPDATE schedules
+		fmt.Sprintf(`UPDATE %s
 		SET payload = :payload, run_at = :run_at, version = version + 1, retry = :retry, result = :result, locked_until = NULL
-		WHERE slug = :slug AND version = :version`,
+		WHERE slug = :slug AND version = :version`, s.tableName),
 		entry)
 	if err != nil {
 		return fmt.Errorf("failed to release lock: %w", err)
@@ -167,7 +183,7 @@ func (s *PgStore) Release(ctx context.Context, task *scheduler.StoreTask) error 
 
 func (s *PgStore) GetSlugs(ctx context.Context) ([]string, error) {
 	slugs := []string{}
-	err := s.db.SelectContext(ctx, &slugs, "SELECT slug FROM schedules")
+	err := s.db.SelectContext(ctx, &slugs, fmt.Sprintf("SELECT slug FROM %s", s.tableName))
 	if err == nil {
 		return slugs, nil
 	}
@@ -181,7 +197,7 @@ func (s *PgStore) GetSlugs(ctx context.Context) ([]string, error) {
 
 func (s *PgStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
 	entry := &PgEntry{}
-	err := s.db.GetContext(ctx, entry, "SELECT slug, kind, payload, run_at, version, retry, result FROM schedules WHERE slug = $1", slug)
+	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT slug, kind, payload, run_at, version, retry, result FROM %s WHERE slug = $1", s.tableName), slug)
 	if err == nil {
 		return fromPgEntry(entry), nil
 	}
@@ -194,7 +210,7 @@ func (s *PgStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, e
 }
 
 func (s *PgStore) Delete(ctx context.Context, slug string) error {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM schedules WHERE slug = $1", slug)
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE slug = $1", s.tableName), slug)
 	if err != nil {
 		return fmt.Errorf("failed to delete '%s': %w", slug, err)
 	}
@@ -210,7 +226,7 @@ func (s *PgStore) Delete(ctx context.Context, slug string) error {
 }
 
 func (s *PgStore) Clear(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM schedules")
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", s.tableName))
 	if err != nil {
 		return fmt.Errorf("failed to clear: %w", err)
 	}

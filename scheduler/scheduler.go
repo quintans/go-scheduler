@@ -353,6 +353,10 @@ func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *St
 		return storeTask
 	}
 
+	if storeTask == nil {
+		return nil
+	}
+
 	storeTask2.Retry = 0
 	// reschedule the Job
 	if task.Trigger == nil {

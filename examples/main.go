@@ -32,18 +32,18 @@ func demoScheduler(wg *sync.WaitGroup) {
 
 	cronTrigger, _ := trigger.NewCronTrigger("1/3 * * * * *")
 	cronJob := &PrintJob{"print-cron"}
-	sched.RegisterJob(cronJob, cronTrigger)
+	sched.RegisterJob(cronJob, scheduler.TriggerOption(cronTrigger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sched.Start(ctx)
 
-	sched.ScheduleJob(ctx, "ad-hoc", printJob, []byte("Ad hoc Job"), time.Second*5)
-	sched.ScheduleJob(ctx, "first", printJob, []byte("First job"), time.Second*12)
-	sched.ScheduleJob(ctx, "second", printJob, []byte("Second job"), time.Second*6)
-	sched.ScheduleJob(ctx, "third", printJob, []byte("Third job"), time.Second*3)
+	sched.ScheduleJob(ctx, "ad-hoc", printJob, time.Second*5, scheduler.PayloadOption([]byte("Ad hoc Job")))
+	sched.ScheduleJob(ctx, "first", printJob, time.Second*12, scheduler.PayloadOption([]byte("First job")))
+	sched.ScheduleJob(ctx, "second", printJob, time.Second*6, scheduler.PayloadOption([]byte("Second job")))
+	sched.ScheduleJob(ctx, "third", printJob, time.Second*3, scheduler.PayloadOption([]byte("Third job")))
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	sched.ScheduleJob(ctx, "cron", cronJob, []byte("Cron job"), delay)
+	sched.ScheduleJob(ctx, "cron", cronJob, delay, scheduler.PayloadOption([]byte("Cron job")))
 
 	time.Sleep(time.Second * 10)
 
@@ -72,16 +72,16 @@ func demoJobs(wg *sync.WaitGroup) {
 	curlJob, err := scheduler.NewCurlJob("curl-clock", http.MethodGet, "http://worldclockapi.com/api/json/est/now", "", nil)
 	mustNoError(err)
 
-	sched.RegisterJob(shellJob, cronTrigger)
-	sched.RegisterJob(curlJob, trigger.NewSimpleTrigger(time.Second*7))
+	sched.RegisterJob(shellJob, scheduler.TriggerOption(cronTrigger))
+	sched.RegisterJob(curlJob, scheduler.TriggerOption(trigger.NewSimpleTrigger(time.Second*7)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sched.Start(ctx)
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	err = sched.ScheduleJob(ctx, "shell-list", shellJob, []byte("ls -la"), delay)
+	err = sched.ScheduleJob(ctx, "shell-list", shellJob, delay, scheduler.PayloadOption([]byte("ls -la")))
 	mustNoError(err)
-	err = sched.ScheduleJob(ctx, "curl-clock", curlJob, nil, time.Second*7)
+	err = sched.ScheduleJob(ctx, "curl-clock", curlJob, time.Second*7)
 	mustNoError(err)
 
 	time.Sleep(time.Second * 10)

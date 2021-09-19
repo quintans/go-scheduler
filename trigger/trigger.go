@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-var ErrExpired = errors.New("trigger has expired")
+var ErrFinished = errors.New("trigger has finished")
 
 // Trigger is the Triggers interface.
 // Triggers are the 'mechanism' by which Jobs are scheduled.
@@ -27,10 +27,4 @@ func NewSimpleTrigger(interval time.Duration) *SimpleTrigger {
 // NextFireTime returns the next time at which the SimpleTrigger is scheduled to fire.
 func (st *SimpleTrigger) NextFireTime(prev time.Time) (time.Time, error) {
 	return prev.Add(st.Interval), nil
-}
-
-// RunOnceTrigger implements the scheduler.Trigger interface. Could be triggered only once.
-type RunOnceTrigger struct {
-	Delay   time.Duration
-	expired bool
 }

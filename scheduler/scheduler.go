@@ -60,6 +60,7 @@ type Job interface {
 type Task struct {
 	Job     Job
 	Trigger trigger.Trigger
+	Backoff trigger.Backoff
 }
 
 type StoreTask struct {
@@ -106,12 +107,14 @@ type JobStore interface {
 type Scheduler interface {
 	// RegisterJob registers the job and trigger
 	// Fails if job already registered.
-	// If trigger is nil, the associated job will only run once.
-	RegisterJob(job Job, trigger trigger.Trigger) error
+	// Otpions allows to define when to:
+	// * trigger the next run after success.
+	// * trigger the next run after failure.
+	RegisterJob(job Job, options ...RegisterJobOption) error
 	// Start starts the scheduler
 	Start(context.Context)
-	// ScheduleJob schedule the job with a initial payload an delay
-	ScheduleJob(ctx context.Context, slug string, job Job, payload []byte, delay time.Duration) error
+	// ScheduleJob schedule the job with a delay. Payload can be defined as an option
+	ScheduleJob(ctx context.Context, slug string, job Job, delay time.Duration, options ...ScheduleJobOption) error
 	// GetJobSlugs get slugs of all of the scheduled jobs
 	GetJobSlugs(context.Context) ([]string, error)
 	// GetScheduledJob get the scheduled job metadata
@@ -122,14 +125,43 @@ type Scheduler interface {
 	Clear(context.Context) error
 }
 
+type RegisterJobOptions struct {
+	Trigger trigger.Trigger
+	Backoff trigger.Backoff
+}
+
+type RegisterJobOption func(options *RegisterJobOptions)
+
+func TriggerOption(trigger trigger.Trigger) RegisterJobOption {
+	return func(options *RegisterJobOptions) {
+		options.Trigger = trigger
+	}
+}
+
+func BackoffOption(backoff trigger.Backoff) RegisterJobOption {
+	return func(options *RegisterJobOptions) {
+		options.Backoff = backoff
+	}
+}
+
+type ScheduleJobOptions struct {
+	Payload []byte
+}
+
+type ScheduleJobOption func(options *ScheduleJobOptions)
+
+func PayloadOption(payload []byte) ScheduleJobOption {
+	return func(options *ScheduleJobOptions) {
+		options.Payload = payload
+	}
+}
+
 // StdScheduler implements the scheduler.Scheduler interface.
 type StdScheduler struct {
 	sync.Mutex
-	store      JobStore
-	interrupt  chan interface{}
-	heartbeat  time.Duration
-	incBackoff time.Duration
-	maxBackoff time.Duration
+	store     JobStore
+	interrupt chan interface{}
+	heartbeat time.Duration
 	// to avoid concurrent instances to colide when locking we can add some randomness
 	jitter time.Duration
 
@@ -140,12 +172,10 @@ type StdScheduler struct {
 // NewStdScheduler2 returns a new DistScheduler.
 func NewStdScheduler(store JobStore, options ...StdSchedulerOption) *StdScheduler {
 	s := &StdScheduler{
-		store:      store,
-		interrupt:  make(chan interface{}),
-		heartbeat:  10 * time.Second,
-		incBackoff: 10 * time.Second,
-		maxBackoff: 10 * time.Minute,
-		registry:   NewKnownTasks(),
+		store:     store,
+		interrupt: make(chan interface{}),
+		heartbeat: 10 * time.Second,
+		registry:  NewKnownTasks(),
 	}
 	for _, f := range options {
 		f(s)
@@ -162,38 +192,37 @@ func StdSchedulerHeartbeatOption(heartbeat time.Duration) StdSchedulerOption {
 	}
 }
 
-func StdSchedulerIncBackoffOption(backoff time.Duration) StdSchedulerOption {
-	return func(s *StdScheduler) {
-		s.incBackoff = backoff
-	}
-}
-
-func StdSchedulerMaxBackoffOption(backoff time.Duration) StdSchedulerOption {
-	return func(s *StdScheduler) {
-		s.maxBackoff = backoff
-	}
-}
-
 func StdSchedulerJitterOption(jitter time.Duration) StdSchedulerOption {
 	return func(s *StdScheduler) {
 		s.jitter = jitter
 	}
 }
 
-func (s *StdScheduler) RegisterJob(job Job, trigger trigger.Trigger) error {
+func (s *StdScheduler) RegisterJob(job Job, options ...RegisterJobOption) error {
+	opts := RegisterJobOptions{
+		Backoff: trigger.NewExponentialBackoff(),
+	}
+	for _, o := range options {
+		o(&opts)
+	}
 	return s.registry.Add(job.Kind(), &Task{
 		Job:     job,
-		Trigger: trigger,
+		Trigger: opts.Trigger,
+		Backoff: opts.Backoff,
 	})
 }
 
 // ScheduleJob uses the specified Trigger to schedule the Job.
-func (s *StdScheduler) ScheduleJob(ctx context.Context, slug string, job Job, payload []byte, delay time.Duration) error {
+func (s *StdScheduler) ScheduleJob(ctx context.Context, slug string, job Job, delay time.Duration, options ...ScheduleJobOption) error {
+	opts := ScheduleJobOptions{}
+	for _, o := range options {
+		o(&opts)
+	}
 	nextRunTime := time.Now().Add(delay)
 	err := s.store.Create(ctx, &StoreTask{
 		Slug:    slug,
 		Kind:    job.Kind(),
-		Payload: payload,
+		Payload: opts.Payload,
 		When:    nextRunTime,
 	})
 	if err != nil && !errors.Is(err, ErrJobAlreadyScheduled) {
@@ -314,15 +343,16 @@ func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
 		slug := st.Slug
 		st := s.executeTask(ctx, *task, st)
 		if st == nil {
+			log.Printf("Task '%s': deleting task", slug)
 			err := s.store.Delete(ctx, slug)
 			if err != nil {
-				log.Printf("failed to delete task '%s': %+v", slug, err)
+				log.Printf("Task '%s': failed to delete task: %+v", slug, err)
 			}
 			return
 		}
 		err := s.store.Release(ctx, st)
 		if err != nil {
-			log.Printf("failed to release task '%s': %+v", slug, err)
+			log.Printf("Task '%s': failed to release task: %+v", slug, err)
 			return
 		}
 	}()
@@ -334,26 +364,28 @@ func (s *StdScheduler) executeTask(ctx context.Context, task Task, storeTask *St
 	// execute the Job
 	storeTask2, err := task.Job.Execute(ctx, storeTask)
 	if err != nil {
+		log.Printf("Task '%s': failed to execute: %+v", storeTask.Slug, err)
+		if task.Backoff == nil {
+			log.Printf("Task '%s': no retry", storeTask.Slug)
+			return nil
+		}
+
 		storeTask.Result = err.Error()
 		storeTask.Retry++
 
-		factor := int64(1)
-		var backoff int64
-		for i := 1; i <= storeTask.Retry; i++ {
-			backoff = factor * int64(s.incBackoff)
-			if backoff > s.maxBackoff.Nanoseconds() {
-				backoff = s.maxBackoff.Nanoseconds()
-				break
-			}
-			factor = factor * 2
+		when, errRetry := task.Backoff.NextRetryTime(storeTask.When, storeTask.Retry)
+		if errRetry != nil {
+			// no more attempts will be made
+			log.Printf("Task '%s': no more retries: %+v", storeTask.Slug, errRetry)
+			return nil
 		}
-		delay := time.Duration(backoff)
-		log.Printf("failed to execute task '%s'. Backoff %s: %+v", storeTask.Slug, delay, err)
-		storeTask.When = time.Now().Add(delay)
+
+		log.Printf("Task '%s': Backoff to %s: %+v", storeTask.Slug, when, err)
+		storeTask.When = when
 		return storeTask
 	}
 
-	if storeTask == nil {
+	if storeTask2 == nil {
 		return nil
 	}
 

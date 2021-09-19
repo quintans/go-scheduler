@@ -15,9 +15,10 @@ import (
 func testScheduler(t *testing.T, store scheduler.JobStore) {
 	sched := scheduler.NewStdScheduler(
 		store,
-		scheduler.StdSchedulerIncBackoffOption(100*time.Millisecond),
 		scheduler.StdSchedulerHeartbeatOption(time.Second),
 	)
+
+	backoff := trigger.NewExponentialBackoff(trigger.StdSchedulerIncBackoffOption(100 * time.Millisecond))
 
 	shellJob := scheduler.NewShellJob()
 
@@ -27,20 +28,21 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	errCurlJob, err := scheduler.NewCurlJob("curl-bad", http.MethodGet, "http://", "", nil)
 	require.NoError(t, err)
 	// for repeating jobs, we provide a trigger
-	sched.RegisterJob(shellJob, trigger.NewSimpleTrigger(time.Millisecond*700))
-	sched.RegisterJob(errCurlJob, trigger.NewSimpleTrigger(time.Millisecond*800))
-	// to make a job run only once, we provide a nil trigger
-	sched.RegisterJob(curlJob, nil)
+	sched.RegisterJob(shellJob, scheduler.TriggerOption(trigger.NewSimpleTrigger(time.Millisecond*700)))
+	sched.RegisterJob(errCurlJob, scheduler.TriggerOption(trigger.NewSimpleTrigger(time.Millisecond*800)), scheduler.BackoffOption(backoff))
+	// to make a job run only once, we don't provide a trigger option
+	sched.RegisterJob(curlJob)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// call start after registering all jobs
 	sched.Start(ctx)
 	// dynamic jobs, receive execution parameters though the payload argument
-	sched.ScheduleJob(ctx, "sh-good", shellJob, []byte("ls -la"), time.Millisecond*700)
-	sched.ScheduleJob(ctx, "sh-bad", shellJob, []byte("ls -z"), time.Millisecond)
+	sched.ScheduleJob(ctx, "sh-good", shellJob, time.Millisecond*700, scheduler.PayloadOption([]byte("ls -la")))
+	sched.ScheduleJob(ctx, "sh-bad", shellJob, time.Millisecond, scheduler.PayloadOption([]byte("ls -z")))
 
 	// static jobs, that execute always the same task, usually don't provide payload
-	sched.ScheduleJob(ctx, "curl-good", curlJob, nil, time.Millisecond)
-	sched.ScheduleJob(ctx, "curl-bad", errCurlJob, nil, time.Millisecond*800)
+	sched.ScheduleJob(ctx, "curl-good", curlJob, time.Millisecond)
+	sched.ScheduleJob(ctx, "curl-bad", errCurlJob, time.Millisecond*800)
 
 	time.Sleep(4 * time.Second)
 	scheduledJobKeys, err := sched.GetJobSlugs(ctx)

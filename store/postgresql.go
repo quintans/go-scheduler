@@ -40,15 +40,18 @@ func toPgEntry(t *scheduler.StoreTask) *PgEntry {
 	}
 }
 
-func fromPgEntry(t *PgEntry) *scheduler.StoreTask {
+func fromPgEntry(e *PgEntry) *scheduler.StoreTask {
+	if e == nil {
+		return nil
+	}
 	return &scheduler.StoreTask{
-		Slug:    t.Slug,
-		Kind:    t.Kind,
-		Payload: t.Payload,
-		When:    t.When.UTC(),
-		Version: t.Version,
-		Retry:   t.Retry,
-		Result:  t.Result,
+		Slug:    e.Slug,
+		Kind:    e.Kind,
+		Payload: e.Payload,
+		When:    e.When.UTC(),
+		Version: e.Version,
+		Retry:   e.Retry,
+		Result:  e.Result,
 	}
 }
 
@@ -101,69 +104,64 @@ func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 }
 
 // NextRun returns the next available run
-func (s *PgStore) NextRun(ctx context.Context) (time.Time, error) {
-	var runAt time.Time
+func (s *PgStore) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	now := time.Now().UTC()
-	err := s.db.GetContext(ctx, &runAt, fmt.Sprintf("SELECT run_at FROM %s WHERE locked_until IS NULL OR locked_until < $1 ORDER BY run_at ASC LIMIT 1", s.tableName), now)
-	if err == nil {
-		return runAt.UTC(), nil
-	}
+	entry := &PgEntry{}
+	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT slug, kind, payload, run_at, version, retry, result FROM %s
+	WHERE locked_until IS NULL OR locked_until < $1
+	ORDER BY run_at
+	ASC LIMIT 1`,
+		s.tableName), now)
+
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, scheduler.ErrJobNotFound
+		return nil, scheduler.ErrJobNotFound
 	}
 
-	return time.Time{}, fmt.Errorf("failed selecting next run: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("failed selecting next run: %w", err)
+	}
+
+	return fromPgEntry(entry), nil
 }
 
-func (s *PgStore) Lock(ctx context.Context) (*scheduler.StoreTask, error) {
-	var entry *PgEntry
+func (s *PgStore) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+	var entry *scheduler.StoreTask
 	err := s.withTx(ctx, func(c context.Context, t *sqlx.Tx) error {
 		var err error
-		entry, err = s.lock(c, t)
+		entry, err = s.lock(c, t, task)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return fromPgEntry(entry), nil
-}
-
-func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx) (*PgEntry, error) {
-	now := time.Now().UTC()
-	lockUntil := now.Add(s.lockDuration)
-	res, err := t.QueryxContext(ctx,
-		fmt.Sprintf(`UPDATE %s SET locked_until = $1, version = version + 1
-		WHERE slug = (
-			SELECT slug
-			FROM %s
-			WHERE run_at < $2 AND locked_until IS NULL OR locked_until < $3
-			ORDER BY run_at ASC 
-			FOR UPDATE SKIP LOCKED
-			LIMIT 1
-		)
-		RETURNING slug, kind, payload, run_at, version, retry, result`, s.tableName, s.tableName),
-		lockUntil, now, now)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, scheduler.ErrJobNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to lock: %w", err)
-	}
-	defer res.Close()
-
-	if !res.Next() {
-		return nil, scheduler.ErrJobNotFound
-	}
-	entry := &PgEntry{}
-	err = res.StructScan(entry)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan locked entry: %w", err)
-	}
-
 	return entry, nil
 }
 
-func (s *PgStore) Release(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+	now := time.Now().UTC()
+	lockUntil := now.Add(s.lockDuration)
+	res, err := t.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE %s SET locked_until = $1, version = version + 1
+		WHERE slug = $2 AND version = $3`, s.tableName),
+		lockUntil, task.Slug, task.Version)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get affected rows when locking '%s': %w", task.Slug, err)
+	}
+	if affected == 0 {
+		return nil, scheduler.ErrJobNotLocked
+	}
+
+	entry := *task
+	entry.Version++
+
+	return &entry, nil
+}
+
+func (s *PgStore) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toPgEntry(task)
 	res, err := s.db.NamedExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s

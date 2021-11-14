@@ -13,6 +13,7 @@ import (
 
 var (
 	ErrJobNotFound         = errors.New("no job with the given Slug was found")
+	ErrJobNotLocked        = errors.New("job lock was not acquired")
 	ErrJobAlreadyScheduled = errors.New("job already scheduled")
 	ErrJobAlreadyExists    = errors.New("job already exists")
 )
@@ -87,11 +88,11 @@ type JobStore interface {
 	// Create schedule a new task
 	Create(context.Context, *StoreTask) error
 	// NextRun finds the next run time
-	NextRun(context.Context) (time.Time, error)
+	NextRun(context.Context) (*StoreTask, error)
 	// Lock find and locks a the next task to be run
-	Lock(context.Context) (*StoreTask, error)
-	// Release releases the acquired lock and updates the data for the next run
-	Release(context.Context, *StoreTask) error
+	Lock(context.Context, *StoreTask) (*StoreTask, error)
+	// Reschedule releases the acquired lock and updates the data for the next run
+	Reschedule(context.Context, *StoreTask) error
 	// GetSlugs gets all the slugs
 	GetSlugs(context.Context) ([]string, error)
 	// Get gets a stored task
@@ -132,13 +133,13 @@ type RegisterJobOptions struct {
 
 type RegisterJobOption func(options *RegisterJobOptions)
 
-func TriggerOption(trigger trigger.Trigger) RegisterJobOption {
+func WithTrigger(trigger trigger.Trigger) RegisterJobOption {
 	return func(options *RegisterJobOptions) {
 		options.Trigger = trigger
 	}
 }
 
-func BackoffOption(backoff trigger.Backoff) RegisterJobOption {
+func WithBackoff(backoff trigger.Backoff) RegisterJobOption {
 	return func(options *RegisterJobOptions) {
 		options.Backoff = backoff
 	}
@@ -150,7 +151,7 @@ type ScheduleJobOptions struct {
 
 type ScheduleJobOption func(options *ScheduleJobOptions)
 
-func PayloadOption(payload []byte) ScheduleJobOption {
+func WithPayload(payload []byte) ScheduleJobOption {
 	return func(options *ScheduleJobOptions) {
 		options.Payload = payload
 	}
@@ -283,7 +284,7 @@ func (s *StdScheduler) Clear(ctx context.Context) error {
 
 func (s *StdScheduler) startExecutionLoop(ctx context.Context) {
 	for {
-		run, err := s.calculateNextRun(ctx)
+		run, task, err := s.calculateNextRun(ctx)
 		if err != nil {
 			log.Printf("failed to calculate next run: %v", err)
 		}
@@ -296,8 +297,8 @@ func (s *StdScheduler) startExecutionLoop(ctx context.Context) {
 		} else {
 			select {
 			case <-run.C:
-				err := s.executeAndReschedule(ctx)
-				if err != nil {
+				err := s.executeAndReschedule(ctx, task)
+				if err != nil && !errors.Is(err, ErrJobNotLocked) {
 					log.Printf("failed to execute and reschedule task: %+v", err)
 				}
 			case <-s.interrupt:
@@ -312,24 +313,24 @@ func (s *StdScheduler) startExecutionLoop(ctx context.Context) {
 	}
 }
 
-func (s *StdScheduler) calculateNextRun(ctx context.Context) (*time.Timer, error) {
-	ts, err := s.store.NextRun(ctx)
-	if err != nil && !errors.Is(err, ErrJobNotFound) {
-		return nil, err
+func (s *StdScheduler) calculateNextRun(ctx context.Context) (*time.Timer, *StoreTask, error) {
+	task, err := s.store.NextRun(ctx)
+	if errors.Is(err, ErrJobNotFound) {
+		return nil, nil, nil
 	}
-	if (ts == time.Time{}) {
-		return nil, nil
+	if err != nil {
+		return nil, nil, err
 	}
 
-	park := parkTime(ts)
+	park := parkTime(task.When)
 	if s.jitter > 0 {
 		park = time.Duration(int64(park) + rand.Int63n(int64(s.jitter)))
 	}
-	return time.NewTimer(park), nil
+	return time.NewTimer(park), task, nil
 }
 
-func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
-	st, err := s.store.Lock(ctx)
+func (s *StdScheduler) executeAndReschedule(ctx context.Context, st *StoreTask) error {
+	st, err := s.store.Lock(ctx, st)
 	s.reset()
 	if err != nil {
 		return err
@@ -350,7 +351,7 @@ func (s *StdScheduler) executeAndReschedule(ctx context.Context) error {
 			}
 			return
 		}
-		err := s.store.Release(ctx, st)
+		err := s.store.Reschedule(ctx, st)
 		if err != nil {
 			log.Printf("Task '%s': failed to release task: %+v", slug, err)
 			return

@@ -32,18 +32,18 @@ func demoScheduler(wg *sync.WaitGroup) {
 
 	cronTrigger, _ := trigger.NewCronTrigger("1/3 * * * * *")
 	cronJob := &PrintJob{"print-cron"}
-	sched.RegisterJob(cronJob, scheduler.TriggerOption(cronTrigger))
+	sched.RegisterJob(cronJob, scheduler.WithTrigger(cronTrigger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sched.Start(ctx)
 
-	sched.ScheduleJob(ctx, "ad-hoc", printJob, time.Second*5, scheduler.PayloadOption([]byte("Ad hoc Job")))
-	sched.ScheduleJob(ctx, "first", printJob, time.Second*12, scheduler.PayloadOption([]byte("First job")))
-	sched.ScheduleJob(ctx, "second", printJob, time.Second*6, scheduler.PayloadOption([]byte("Second job")))
-	sched.ScheduleJob(ctx, "third", printJob, time.Second*3, scheduler.PayloadOption([]byte("Third job")))
+	sched.ScheduleJob(ctx, "ad-hoc", printJob, time.Second*5, scheduler.WithPayload([]byte("Ad hoc Job")))
+	sched.ScheduleJob(ctx, "first", printJob, time.Second*12, scheduler.WithPayload([]byte("First job")))
+	sched.ScheduleJob(ctx, "second", printJob, time.Second*6, scheduler.WithPayload([]byte("Second job")))
+	sched.ScheduleJob(ctx, "third", printJob, time.Second*3, scheduler.WithPayload([]byte("Third job")))
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	sched.ScheduleJob(ctx, "cron", cronJob, delay, scheduler.PayloadOption([]byte("Cron job")))
+	sched.ScheduleJob(ctx, "cron", cronJob, delay, scheduler.WithPayload([]byte("Cron job")))
 
 	time.Sleep(time.Second * 10)
 
@@ -72,14 +72,14 @@ func demoJobs(wg *sync.WaitGroup) {
 	curlJob, err := scheduler.NewCurlJob("curl-clock", http.MethodGet, "http://worldclockapi.com/api/json/est/now", "", nil)
 	mustNoError(err)
 
-	sched.RegisterJob(shellJob, scheduler.TriggerOption(cronTrigger))
-	sched.RegisterJob(curlJob, scheduler.TriggerOption(trigger.NewSimpleTrigger(time.Second*7)))
+	sched.RegisterJob(shellJob, scheduler.WithTrigger(cronTrigger))
+	sched.RegisterJob(curlJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Second*7)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sched.Start(ctx)
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	err = sched.ScheduleJob(ctx, "shell-list", shellJob, delay, scheduler.PayloadOption([]byte("ls -la")))
+	err = sched.ScheduleJob(ctx, "shell-list", shellJob, delay, scheduler.WithPayload([]byte("ls -la")))
 	mustNoError(err)
 	err = sched.ScheduleJob(ctx, "curl-clock", curlJob, time.Second*7)
 	mustNoError(err)

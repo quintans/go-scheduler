@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/quintans/go-scheduler/scheduler"
 )
@@ -36,20 +35,22 @@ func (s *MemStore) Create(_ context.Context, task *scheduler.StoreTask) error {
 	return nil
 }
 
-func (s *MemStore) NextRun(context.Context) (time.Time, error) {
+func (s *MemStore) NextRun(context.Context) (*scheduler.StoreTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.queue.Len() == 0 {
-		return time.Time{}, scheduler.ErrJobNotFound
+		return nil, scheduler.ErrJobNotFound
 	}
 
 	ts := s.queue.Head().When
 
-	return ts, nil
+	return &scheduler.StoreTask{
+		When: ts,
+	}, nil
 }
 
-func (s *MemStore) Lock(context.Context) (*scheduler.StoreTask, error) {
+func (s *MemStore) Lock(context.Context, *scheduler.StoreTask) (*scheduler.StoreTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -65,7 +66,7 @@ func (s *MemStore) Lock(context.Context) (*scheduler.StoreTask, error) {
 	return entry.StoreTask, nil
 }
 
-func (s *MemStore) Release(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *MemStore) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

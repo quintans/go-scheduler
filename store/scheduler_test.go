@@ -28,8 +28,8 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	errCurlJob, err := scheduler.NewCurlJob("curl-bad", http.MethodGet, "http://", "", nil)
 	require.NoError(t, err)
 	// for repeating jobs, we provide a trigger
-	sched.RegisterJob(shellJob, scheduler.TriggerOption(trigger.NewSimpleTrigger(time.Millisecond*700)))
-	sched.RegisterJob(errCurlJob, scheduler.TriggerOption(trigger.NewSimpleTrigger(time.Millisecond*800)), scheduler.BackoffOption(backoff))
+	sched.RegisterJob(shellJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*700)))
+	sched.RegisterJob(errCurlJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*800)), scheduler.WithBackoff(backoff))
 	// to make a job run only once, we don't provide a trigger option
 	sched.RegisterJob(curlJob)
 
@@ -37,8 +37,8 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	// call start after registering all jobs
 	sched.Start(ctx)
 	// dynamic jobs, receive execution parameters though the payload argument
-	sched.ScheduleJob(ctx, "sh-good", shellJob, time.Millisecond*700, scheduler.PayloadOption([]byte("ls -la")))
-	sched.ScheduleJob(ctx, "sh-bad", shellJob, time.Millisecond, scheduler.PayloadOption([]byte("ls -z")))
+	sched.ScheduleJob(ctx, "sh-good", shellJob, time.Millisecond*700, scheduler.WithPayload([]byte("ls -la")))
+	sched.ScheduleJob(ctx, "sh-bad", shellJob, time.Millisecond, scheduler.WithPayload([]byte("ls -z")))
 
 	// static jobs, that execute always the same task, usually don't provide payload
 	sched.ScheduleJob(ctx, "curl-good", curlJob, time.Millisecond)

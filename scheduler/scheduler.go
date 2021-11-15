@@ -175,7 +175,7 @@ func NewStdScheduler(store JobStore, options ...StdSchedulerOption) *StdSchedule
 	s := &StdScheduler{
 		store:     store,
 		interrupt: make(chan interface{}),
-		heartbeat: 10 * time.Second,
+		heartbeat: time.Minute,
 		registry:  NewKnownTasks(),
 	}
 	for _, f := range options {

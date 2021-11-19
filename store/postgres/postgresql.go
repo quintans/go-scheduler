@@ -18,18 +18,18 @@ const (
 	pgUniqueViolation = "23505"
 )
 
-type PgEntry struct {
-	Slug    string `db:"slug"`
-	Kind    string
-	Payload []byte
+type Entry struct {
+	Slug    string    `db:"slug"`
+	Kind    string    `db:"kind"`
+	Payload []byte    `db:"payload"`
 	When    time.Time `db:"run_at"`
 	Version int64     `db:"version"`
 	Retry   int       `db:"retry"`
 	Result  string    `db:"result"`
 }
 
-func toPgEntry(t *scheduler.StoreTask) *PgEntry {
-	return &PgEntry{
+func toEntry(t *scheduler.StoreTask) *Entry {
+	return &Entry{
 		Slug:    t.Slug,
 		Kind:    t.Kind,
 		Payload: t.Payload,
@@ -40,7 +40,7 @@ func toPgEntry(t *scheduler.StoreTask) *PgEntry {
 	}
 }
 
-func fromPgEntry(e *PgEntry) *scheduler.StoreTask {
+func fromEntry(e *Entry) *scheduler.StoreTask {
 	if e == nil {
 		return nil
 	}
@@ -55,23 +55,23 @@ func fromPgEntry(e *PgEntry) *scheduler.StoreTask {
 	}
 }
 
-type PgStoreOption func(*PgStore)
+type StoreOption func(*Store)
 
-func TableNameOption(tableName string) PgStoreOption {
-	return func(ps *PgStore) {
+func TableOption(tableName string) StoreOption {
+	return func(ps *Store) {
 		ps.tableName = tableName
 	}
 }
 
-// PgStore is a PostgreSQL task store.
-type PgStore struct {
+// Store is a PostgreSQL task store.
+type Store struct {
 	db           *sqlx.DB
 	lockDuration time.Duration
 	tableName    string
 }
 
-func New(db *sql.DB, options ...PgStoreOption) *PgStore {
-	ps := &PgStore{
+func New(db *sql.DB, options ...StoreOption) *Store {
+	ps := &Store{
 		db:           sqlx.NewDb(db, driverName),
 		lockDuration: 5 * time.Minute,
 		tableName:    "schedules",
@@ -84,8 +84,8 @@ func New(db *sql.DB, options ...PgStoreOption) *PgStore {
 	return ps
 }
 
-func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toPgEntry(task)
+func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
+	entry := toEntry(task)
 	_, err := s.db.NamedExecContext(
 		ctx,
 		fmt.Sprintf(`INSERT INTO %s (slug, kind, payload, run_at, version, retry, result, locked_until)
@@ -96,7 +96,7 @@ func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 		return nil
 	}
 
-	if isPgDup(err) {
+	if isDup(err) {
 		return scheduler.ErrJobAlreadyExists
 	}
 
@@ -104,9 +104,9 @@ func (s *PgStore) Create(ctx context.Context, task *scheduler.StoreTask) error {
 }
 
 // NextRun returns the next available run
-func (s *PgStore) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
+func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	now := time.Now().UTC()
-	entry := &PgEntry{}
+	entry := &Entry{}
 	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT slug, kind, payload, run_at, version, retry, result FROM %s
 	WHERE locked_until IS NULL OR locked_until < $1
 	ORDER BY run_at
@@ -121,10 +121,10 @@ func (s *PgStore) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 		return nil, fmt.Errorf("failed selecting next run: %w", err)
 	}
 
-	return fromPgEntry(entry), nil
+	return fromEntry(entry), nil
 }
 
-func (s *PgStore) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
 	var entry *scheduler.StoreTask
 	err := s.withTx(ctx, func(c context.Context, t *sqlx.Tx) error {
 		var err error
@@ -137,7 +137,7 @@ func (s *PgStore) Lock(ctx context.Context, task *scheduler.StoreTask) (*schedul
 	return entry, nil
 }
 
-func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+func (s *Store) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
 	now := time.Now().UTC()
 	lockUntil := now.Add(s.lockDuration)
 	res, err := t.ExecContext(ctx,
@@ -161,8 +161,8 @@ func (s *PgStore) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTas
 	return &entry, nil
 }
 
-func (s *PgStore) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toPgEntry(task)
+func (s *Store) Release(ctx context.Context, task *scheduler.StoreTask) error {
+	entry := toEntry(task)
 	res, err := s.db.NamedExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s
 		SET payload = :payload, run_at = :run_at, version = version + 1, retry = :retry, result = :result, locked_until = NULL
@@ -179,7 +179,7 @@ func (s *PgStore) Reschedule(ctx context.Context, task *scheduler.StoreTask) err
 	return nil
 }
 
-func (s *PgStore) GetSlugs(ctx context.Context) ([]string, error) {
+func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 	slugs := []string{}
 	err := s.db.SelectContext(ctx, &slugs, fmt.Sprintf("SELECT slug FROM %s", s.tableName))
 	if err == nil {
@@ -193,11 +193,11 @@ func (s *PgStore) GetSlugs(ctx context.Context) ([]string, error) {
 	return nil, fmt.Errorf("failed to get slugs: %w", err)
 }
 
-func (s *PgStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
-	entry := &PgEntry{}
+func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
+	entry := &Entry{}
 	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT slug, kind, payload, run_at, version, retry, result FROM %s WHERE slug = $1", s.tableName), slug)
 	if err == nil {
-		return fromPgEntry(entry), nil
+		return fromEntry(entry), nil
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -207,7 +207,7 @@ func (s *PgStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, e
 	return nil, fmt.Errorf("get task '%s': %w", slug, err)
 }
 
-func (s *PgStore) Delete(ctx context.Context, slug string) error {
+func (s *Store) Delete(ctx context.Context, slug string) error {
 	res, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE slug = $1", s.tableName), slug)
 	if err != nil {
 		return fmt.Errorf("failed to delete '%s': %w", slug, err)
@@ -223,7 +223,7 @@ func (s *PgStore) Delete(ctx context.Context, slug string) error {
 	return nil
 }
 
-func (s *PgStore) Clear(ctx context.Context) error {
+func (s *Store) Clear(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", s.tableName))
 	if err != nil {
 		return fmt.Errorf("failed to clear: %w", err)
@@ -231,12 +231,12 @@ func (s *PgStore) Clear(ctx context.Context) error {
 	return nil
 }
 
-func isPgDup(err error) bool {
+func isDup(err error) bool {
 	pgerr, ok := err.(*pq.Error)
 	return ok && pgerr.Code == pgUniqueViolation
 }
 
-func (r *PgStore) withTx(ctx context.Context, fn func(context.Context, *sqlx.Tx) error) (err error) {
+func (r *Store) withTx(ctx context.Context, fn func(context.Context, *sqlx.Tx) error) (err error) {
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)

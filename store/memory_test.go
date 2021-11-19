@@ -8,5 +8,7 @@ import (
 
 func TestMemStore(t *testing.T) {
 	store := memory.New()
-	testScheduler(t, store)
+	t.Run("memory", func(t *testing.T) {
+		testScheduler(t, store)
+	})
 }

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/quintans/go-scheduler/scheduler"
-	"github.com/quintans/go-scheduler/store"
+	"github.com/quintans/go-scheduler/store/memory"
 	"github.com/quintans/go-scheduler/trigger"
 )
 
@@ -24,7 +24,7 @@ func main() {
 }
 
 func demoScheduler(wg *sync.WaitGroup) {
-	store := store.NewMemStore()
+	store := memory.New()
 	var sched scheduler.Scheduler = scheduler.NewStdScheduler(store)
 
 	printJob := &PrintJob{"print-once"}
@@ -64,7 +64,7 @@ func demoScheduler(wg *sync.WaitGroup) {
 }
 
 func demoJobs(wg *sync.WaitGroup) {
-	store := store.NewMemStore()
+	store := memory.New()
 	sched := scheduler.NewStdScheduler(store)
 
 	cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")

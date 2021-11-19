@@ -1,4 +1,4 @@
-package store
+package postgres
 
 import (
 	"context"
@@ -70,7 +70,7 @@ type PgStore struct {
 	tableName    string
 }
 
-func NewPgStore(db *sql.DB, options ...PgStoreOption) *PgStore {
+func New(db *sql.DB, options ...PgStoreOption) *PgStore {
 	ps := &PgStore{
 		db:           sqlx.NewDb(db, driverName),
 		lockDuration: 5 * time.Minute,

@@ -1,4 +1,4 @@
-package store
+package memory
 
 import (
 	"container/heap"
@@ -17,7 +17,7 @@ type MemStore struct {
 	locked map[string]*MemEntry
 }
 
-func NewMemStore() *MemStore {
+func New() *MemStore {
 	return &MemStore{
 		queue:  &PriorityQueue{},
 		locked: map[string]*MemEntry{},

@@ -3,10 +3,10 @@ package store_test
 import (
 	"testing"
 
-	"github.com/quintans/go-scheduler/store"
+	"github.com/quintans/go-scheduler/store/memory"
 )
 
 func TestMemStore(t *testing.T) {
-	store := store.NewMemStore()
+	store := memory.New()
 	testScheduler(t, store)
 }

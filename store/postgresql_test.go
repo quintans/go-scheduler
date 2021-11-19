@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/quintans/go-scheduler/store"
+	"github.com/quintans/go-scheduler/store/postgres"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/go-connections/nat"
@@ -24,7 +24,7 @@ func TestPgStore(t *testing.T) {
 	db, err := pgConnect(cfg)
 	require.NoError(t, err)
 	defer db.Close()
-	store := store.NewPgStore(db.DB)
+	store := postgres.New(db.DB)
 	testScheduler(t, store)
 }
 

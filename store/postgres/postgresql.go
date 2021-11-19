@@ -161,7 +161,7 @@ func (s *Store) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask)
 	return &entry, nil
 }
 
-func (s *Store) Release(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *Store) Unlock(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toEntry(task)
 	res, err := s.db.NamedExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s
@@ -169,11 +169,11 @@ func (s *Store) Release(ctx context.Context, task *scheduler.StoreTask) error {
 		WHERE slug = :slug AND version = :version`, s.tableName),
 		entry)
 	if err != nil {
-		return fmt.Errorf("failed to release lock: %w", err)
+		return fmt.Errorf("failed to unlock lock: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("failed to release lock %+v: no update: %w", entry, scheduler.ErrJobNotFound)
+		return fmt.Errorf("failed to unlock lock %+v: no update: %w", entry, scheduler.ErrJobNotFound)
 	}
 
 	return nil

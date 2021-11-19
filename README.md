@@ -2,7 +2,7 @@
 Simple durable and distributed scheduling library for go.
 
 ## About
-inspired by [go-quarts](https://github.com/reugn/go-quartz) and expanded to be able to run running in a distributed mode depending on the storage implementation.
+inspired by [go-quartz](https://github.com/reugn/go-quartz) and expanded to be able to run running in a distributed mode depending on the storage implementation.
 
 ## How To
 
@@ -87,8 +87,8 @@ type JobStore interface {
 	NextRun(context.Context) (*StoreTask, error)
 	// Lock find and locks a the next task to be run
 	Lock(context.Context, *StoreTask) (*StoreTask, error)
-	// Release releases the acquired lock and updates the data for the next run
-	Release(context.Context, *StoreTask) error
+	// Unlock releases the acquired lock and updates the data for the next run
+	Unlock(context.Context, *StoreTask) error
 	// GetSlugs gets all the slugs
 	GetSlugs(context.Context) ([]string, error)
 	// Get gets a stored task

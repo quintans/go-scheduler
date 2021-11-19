@@ -161,14 +161,14 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 	return fromEntry(e), nil
 }
 
-func (s *Store) Release(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *Store) Unlock(ctx context.Context, task *scheduler.StoreTask) error {
 	_, err := s.update(ctx, task.Slug, task.Version, func(_ *Entry) (*Entry, error) {
 		e := toEntry(task)
 		e.Unlock()
 		return e, nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to release lock '%s': %w", task.Slug, err)
+		return fmt.Errorf("failed to unlock lock '%s': %w", task.Slug, err)
 	}
 	return nil
 }

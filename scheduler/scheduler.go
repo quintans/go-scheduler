@@ -91,8 +91,8 @@ type JobStore interface {
 	NextRun(context.Context) (*StoreTask, error)
 	// Lock find and locks a the next task to be run
 	Lock(context.Context, *StoreTask) (*StoreTask, error)
-	// Reschedule releases the acquired lock and updates the data for the next run
-	Reschedule(context.Context, *StoreTask) error
+	// Release releases the acquired lock and updates the data for the next run
+	Release(context.Context, *StoreTask) error
 	// GetSlugs gets all the slugs
 	GetSlugs(context.Context) ([]string, error)
 	// Get gets a stored task
@@ -287,6 +287,7 @@ func (s *StdScheduler) startExecutionLoop(ctx context.Context) {
 		run, task, err := s.calculateNextRun(ctx)
 		if err != nil {
 			log.Printf("failed to calculate next run: %v", err)
+			time.Sleep(10 * time.Second)
 		}
 		if run == nil {
 			select {
@@ -351,7 +352,7 @@ func (s *StdScheduler) executeAndReschedule(ctx context.Context, st *StoreTask) 
 			}
 			return
 		}
-		err := s.store.Reschedule(ctx, st)
+		err := s.store.Release(ctx, st)
 		if err != nil {
 			log.Printf("Task '%s': failed to release task: %+v", slug, err)
 			return

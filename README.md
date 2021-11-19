@@ -87,8 +87,8 @@ type JobStore interface {
 	NextRun(context.Context) (*StoreTask, error)
 	// Lock find and locks a the next task to be run
 	Lock(context.Context, *StoreTask) (*StoreTask, error)
-	// Reschedule releases the acquired lock and updates the data for the next run
-	Reschedule(context.Context, *StoreTask) error
+	// Release releases the acquired lock and updates the data for the next run
+	Release(context.Context, *StoreTask) error
 	// GetSlugs gets all the slugs
 	GetSlugs(context.Context) ([]string, error)
 	// Get gets a stored task
@@ -101,15 +101,16 @@ type JobStore interface {
 ```
 
 Available implementations:
-- Memory Store
-- PostgreSQL Store
+- Memory
+- PostgreSQL
+- Firestore
 
 ## Example
 
 ### Repeating
 
 ```go
-    store := store.NewMemStore()
+    store := memory.New()
     sched := scheduler.NewStdScheduler(store)
 
     cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")
@@ -135,7 +136,7 @@ Available implementations:
 
 ```go
     conn = ...
-    store := store.NewPgStore(conn)
+    store := postgres.New(conn)
     sched := scheduler.NewStdScheduler(store)
 
     cancelTxJob := scheduler.NewCancelTransactionJob()

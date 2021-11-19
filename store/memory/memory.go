@@ -66,7 +66,7 @@ func (s *MemStore) Lock(context.Context, *scheduler.StoreTask) (*scheduler.Store
 	return entry.StoreTask, nil
 }
 
-func (s *MemStore) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *MemStore) Release(ctx context.Context, task *scheduler.StoreTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

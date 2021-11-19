@@ -25,7 +25,9 @@ func TestPgStore(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	store := postgres.New(db.DB)
-	testScheduler(t, store)
+	t.Run("postgres", func(t *testing.T) {
+		testScheduler(t, store)
+	})
 }
 
 type PgConfig struct {

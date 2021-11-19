@@ -161,7 +161,7 @@ func (s *Store) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask)
 	return &entry, nil
 }
 
-func (s *Store) Unlock(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toEntry(task)
 	res, err := s.db.NamedExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s

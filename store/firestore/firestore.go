@@ -161,7 +161,7 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 	return fromEntry(e), nil
 }
 
-func (s *Store) Unlock(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
 	_, err := s.update(ctx, task.Slug, task.Version, func(_ *Entry) (*Entry, error) {
 		e := toEntry(task)
 		e.Unlock()

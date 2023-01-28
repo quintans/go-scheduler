@@ -28,7 +28,7 @@ func demoScheduler(wg *sync.WaitGroup) {
 	var sched scheduler.Scheduler = scheduler.NewStdScheduler(store)
 
 	printJob := &PrintJob{"print-once"}
-	sched.RegisterJob(printJob, nil)
+	sched.RegisterJob(printJob)
 
 	cronTrigger, _ := trigger.NewCronTrigger("1/3 * * * * *")
 	cronJob := &PrintJob{"print-cron"}
@@ -43,7 +43,7 @@ func demoScheduler(wg *sync.WaitGroup) {
 	sched.ScheduleJob(ctx, "third", printJob, time.Second*3, scheduler.WithPayload([]byte("Third job")))
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	sched.ScheduleJob(ctx, "cron", cronJob, delay, scheduler.WithPayload([]byte("Cron job")))
+	sched.ScheduleJob(ctx, "print-cron", cronJob, delay, scheduler.WithPayload([]byte("Cron job")))
 
 	time.Sleep(time.Second * 10)
 

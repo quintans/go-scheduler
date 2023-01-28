@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os/exec"
 )
@@ -29,7 +29,7 @@ func (sh *ShellJob) Execute(_ context.Context, st *StoreTask) (*StoreTask, error
 	if err != nil {
 		return nil, err
 	}
-	st.Result = string(out[:])
+	st.Result = string(out)
 	return st, nil
 }
 
@@ -82,7 +82,7 @@ func (cu *CurlJob) Execute(_ context.Context, st *StoreTask) (*StoreTask, error)
 	}
 
 	defer res.Body.Close()
-	body, _ := ioutil.ReadAll(res.Body)
+	body, _ := io.ReadAll(res.Body)
 	result := fmt.Sprintf("%d\n%s", res.StatusCode, string(body))
 	if res.StatusCode >= 200 && res.StatusCode < 400 {
 		st.Result = result

@@ -13,7 +13,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const deleteBatchSize = 100
+const (
+	deleteBatchSize     = 100
+	defaultLockDuration = 5 * time.Minute
+)
 
 var errOptimisticLocking = errors.New("job was changed by another process")
 
@@ -85,7 +88,7 @@ type Store struct {
 func New(firestoreClient *gfs.Client, options ...StoreOption) *Store {
 	ps := &Store{
 		client:         firestoreClient,
-		lockDuration:   5 * time.Minute,
+		lockDuration:   defaultLockDuration,
 		collectionPath: "schedules",
 	}
 
@@ -120,7 +123,7 @@ func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	now := time.Now().UTC()
 
-	// ideally we would like to retrive documents where "locked_until < now" and order ascending by "run_at"
+	// ideally we would like to retrieve documents where "locked_until < now" and order ascending by "run_at"
 	// but firestore requires that the first order field must be the same as the inequality
 	// see: https://firebase.google.com/docs/firestore/query-data/order-limit-data#limitations
 	// so we have to adopt another strategy. Get all documents ordered ascending by "run_at" and return the first where "locked_until < now"
@@ -263,7 +266,8 @@ func (s *Store) update(ctx context.Context, slug string, version int64, updateFn
 		if err != nil {
 			return err
 		}
-		if err := doc.DataTo(oldEntry); err != nil {
+		err = doc.DataTo(oldEntry)
+		if err != nil {
 			return err
 		}
 		if oldEntry.Version != version {

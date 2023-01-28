@@ -18,6 +18,8 @@ const (
 	pgUniqueViolation = "23505"
 )
 
+const defaultLockDuration = 5 * time.Minute
+
 type Entry struct {
 	Slug    string    `db:"slug"`
 	Kind    string    `db:"kind"`
@@ -73,7 +75,7 @@ type Store struct {
 func New(db *sql.DB, options ...StoreOption) *Store {
 	ps := &Store{
 		db:           sqlx.NewDb(db, driverName),
-		lockDuration: 5 * time.Minute,
+		lockDuration: defaultLockDuration,
 		tableName:    "schedules",
 	}
 
@@ -236,18 +238,18 @@ func isDup(err error) bool {
 	return ok && pgerr.Code == pgUniqueViolation
 }
 
-func (r *Store) withTx(ctx context.Context, fn func(context.Context, *sqlx.Tx) error) (err error) {
-	tx, err := r.db.BeginTxx(ctx, nil)
+func (s *Store) withTx(ctx context.Context, fn func(context.Context, *sqlx.Tx) error) (err error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			panic(r)
 		}
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	err = fn(ctx, tx)

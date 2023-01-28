@@ -52,15 +52,15 @@ the orchestrator
 // Schedulers responsible for executing Jobs when their associated Triggers fire (when their scheduled time arrives).
 type Scheduler interface {
 	// RegisterJob registers the job and trigger
-	// Fails if job already registered.
-	// Otpions allows to define when to:
-	// * trigger the next run after success.
-	// * trigger the next run after failure.
+	// Fails with ErrJobAlreadyScheduled if job already registered.
+	//
+	// This should be used to register the jobs before starting the scheduler.
 	RegisterJob(job Job, options ...RegisterJobOption) error
 	// Start starts the scheduler
 	Start(context.Context)
-	// ScheduleJob schedule the job with a delay. Payload can be defined as an option
-	ScheduleJob(ctx context.Context, slug string, job Job, delay time.Duration, options ...ScheduleJobOption) error
+	// ScheduleJob will attempt to schedule a job, failing with ErrJobAlreadyScheduled if it was already scheduled by another process
+	// and since the job is already registered it will be picked up by one of the concurrent processes.
+	ScheduleJob(ctx context.Context, slug string, job Job, options ...ScheduleJobOption) error
 	// GetJobSlugs get slugs of all of the scheduled jobs
 	GetJobSlugs(context.Context) ([]string, error)
 	// GetScheduledJob get the scheduled job metadata
@@ -127,7 +127,8 @@ Available implementations:
     ctx, cancel := context.WithCancel(context.Background())
     sched.Start(ctx)
     delay, _ := cronTrigger.FirstDelay()
-    sched.ScheduleJob(ctx, "curl-now", curlJob, delay)
+    // if the store already has this schedule, meaning this was already scheduled by another process, it will be ignore
+    sched.ScheduleJob(ctx, "curl-now", curlJob, scheduler.WithDelay(delay))
     time.Sleep(time.Second * 2)
     cancel()
 ```
@@ -140,12 +141,13 @@ Available implementations:
     sched := scheduler.NewStdScheduler(store)
 
     cancelTxJob := scheduler.NewCancelTransactionJob()
-    // nil triggers means non repeatable
-    sched.RegisterJob(cancelTxJob, nil) 
+    // no trigger means non repeatable
+    sched.RegisterJob(cancelTxJob) 
 
     ctx, cancel := context.WithCancel(context.Background())
     sched.Start(ctx)
-    sched.ScheduleJob(ctx, "cancel-tx", cancelTxJob, time.Second, scheduler.WithPayload([]byte("9bfadfd6-8e62-4c58-9b6e-636d666b6643"))
+    // if the store already has this schedule, meaning this was already scheduled by another process, it will be ignore
+    sched.ScheduleJob(ctx, "cancel-tx", cancelTxJob, scheduler.WithDelay(time.Second), scheduler.WithPayload([]byte("9bfadfd6-8e62-4c58-9b6e-636d666b6643"))
     time.Sleep(time.Second * 2)
     cancel()
 ```

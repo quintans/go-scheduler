@@ -69,7 +69,7 @@ func pgSetup() (PgConfig, func(), error) {
 	}
 
 	tearDown := func() {
-		container.Terminate(ctx)
+		_ = container.Terminate(ctx)
 	}
 
 	ip, err := container.Host(ctx)

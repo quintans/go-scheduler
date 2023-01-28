@@ -15,9 +15,11 @@ import (
 // demo main
 func main() {
 	wg := new(sync.WaitGroup)
-	wg.Add(2)
 
+	wg.Add(1)
 	go demoJobs(wg)
+
+	wg.Add(1)
 	go demoScheduler(wg)
 
 	wg.Wait()
@@ -25,25 +27,26 @@ func main() {
 
 func demoScheduler(wg *sync.WaitGroup) {
 	store := memory.New()
-	var sched scheduler.Scheduler = scheduler.NewStdScheduler(store)
+	sched := scheduler.NewStdScheduler(store)
 
 	printJob := &PrintJob{"print-once"}
 	sched.RegisterJob(printJob)
 
 	cronTrigger, _ := trigger.NewCronTrigger("1/3 * * * * *")
 	cronJob := &PrintJob{"print-cron"}
-	sched.RegisterJob(cronJob, scheduler.WithTrigger(cronTrigger))
+	err := sched.RegisterJob(cronJob, scheduler.WithTrigger(cronTrigger))
+	mustNoError(err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sched.Start(ctx)
 
-	sched.ScheduleJob(ctx, "ad-hoc", printJob, time.Second*5, scheduler.WithPayload([]byte("Ad hoc Job")))
-	sched.ScheduleJob(ctx, "first", printJob, time.Second*12, scheduler.WithPayload([]byte("First job")))
-	sched.ScheduleJob(ctx, "second", printJob, time.Second*6, scheduler.WithPayload([]byte("Second job")))
-	sched.ScheduleJob(ctx, "third", printJob, time.Second*3, scheduler.WithPayload([]byte("Third job")))
+	sched.ScheduleJob(ctx, "ad-hoc", printJob, scheduler.WithDelay(time.Second*5), scheduler.WithPayload([]byte("Ad hoc Job")))
+	sched.ScheduleJob(ctx, "first", printJob, scheduler.WithDelay(time.Second*12), scheduler.WithPayload([]byte("First job")))
+	sched.ScheduleJob(ctx, "second", printJob, scheduler.WithDelay(time.Second*6), scheduler.WithPayload([]byte("Second job")))
+	sched.ScheduleJob(ctx, "third", printJob, scheduler.WithDelay(time.Second*3), scheduler.WithPayload([]byte("Third job")))
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	sched.ScheduleJob(ctx, "print-cron", cronJob, delay, scheduler.WithPayload([]byte("Cron job")))
+	sched.ScheduleJob(ctx, "print-cron", cronJob, scheduler.WithDelay(delay), scheduler.WithPayload([]byte("Cron job")))
 
 	time.Sleep(time.Second * 10)
 
@@ -79,9 +82,9 @@ func demoJobs(wg *sync.WaitGroup) {
 	sched.Start(ctx)
 	delay, err := cronTrigger.FirstDelay()
 	mustNoError(err)
-	err = sched.ScheduleJob(ctx, "shell-list", shellJob, delay, scheduler.WithPayload([]byte("ls -la")))
+	err = sched.ScheduleJob(ctx, "shell-list", shellJob, scheduler.WithDelay(delay), scheduler.WithPayload([]byte("ls -la")))
 	mustNoError(err)
-	err = sched.ScheduleJob(ctx, "curl-clock", curlJob, time.Second*7)
+	err = sched.ScheduleJob(ctx, "curl-clock", curlJob, scheduler.WithDelay(time.Second*7))
 	mustNoError(err)
 
 	time.Sleep(time.Second * 10)

@@ -190,7 +190,6 @@ func iterate(prev time.Time, cronTrigger *trigger.CronTrigger, iterations int) (
 	var err error
 	for i := 0; i < iterations; i++ {
 		prev, err = cronTrigger.NextFireTime(prev)
-		// fmt.Println(time.Unix(prev/int64(time.Second), 0).UTC().Format(readDateLayout))
 		if err != nil {
 			return "", err
 		}

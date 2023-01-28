@@ -5,12 +5,12 @@ import (
 	"strconv"
 )
 
-func indexes(search []string, target []string) ([]int, error) {
+func indexes(search, target []string) ([]int, error) {
 	searchIndexes := make([]int, 0, len(search))
 	for _, a := range search {
 		index := intVal(target, a)
 		if index == -1 {
-			return nil, fmt.Errorf("Invalid cron field: %s", a)
+			return nil, fmt.Errorf("invalid cron field: %s", a)
 		}
 		searchIndexes = append(searchIndexes, index)
 	}
@@ -80,7 +80,7 @@ func inScope(i int, min int, max int) bool {
 }
 
 func cronError(cause string) error {
-	return fmt.Errorf("Invalid cron expression: %s", cause)
+	return fmt.Errorf("invalid cron expression: %s", cause)
 }
 
 // Align single digit values (for the time.UnixDate format).
@@ -117,7 +117,7 @@ func atoi(str string) int {
 	return i
 }
 
-func maxDays(month int, year int) int {
+func maxDays(month, year int) int {
 	if month == 2 && isLeapYear(year) {
 		return 29
 	}
@@ -126,12 +126,14 @@ func maxDays(month int, year int) int {
 }
 
 func isLeapYear(year int) bool {
-	if year%4 != 0 {
+	switch {
+	case year%4 != 0:
 		return false
-	} else if year%100 != 0 {
+	case year%100 != 0:
 		return true
-	} else if year%400 != 0 {
+	case year%400 != 0:
 		return false
+	default:
+		return true
 	}
-	return true
 }

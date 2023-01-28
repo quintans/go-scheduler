@@ -18,6 +18,6 @@ func (pj PrintJob) Kind() string {
 
 // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
 func (pj PrintJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
-	fmt.Println("Executing " + string(st.Payload))
+	fmt.Println("PrintJob: executing " + string(st.Payload))
 	return st, nil
 }

@@ -34,7 +34,7 @@ func (b ExponentialBackoff) NextRetryTime(prev time.Time, retry int) (time.Time,
 			backoff = b.maxBackoff.Nanoseconds()
 			break
 		}
-		factor = factor * 2
+		factor *= 2
 	}
 	delay := time.Duration(backoff)
 	return time.Now().Add(delay), nil

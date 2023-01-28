@@ -22,7 +22,9 @@ import (
 // "0 * 14 * * ?"           Fire every minute starting at 2pm and ending at 2:59pm, every day
 // "0 0/5 14 * * ?"         Fire every 5 minutes starting at 2pm and ending at 2:55pm, every day
 // "0 0/5 14,18 * * ?"      Fire every 5 minutes starting at 2pm and ending at 2:55pm,
-//                          AND fire every 5 minutes starting at 6pm and ending at 6:55pm, every day
+//
+//	AND fire every 5 minutes starting at 6pm and ending at 6:55pm, every day
+//
 // "0 0-5 14 * * ?"         Fire every minute starting at 2pm and ending at 2:05pm, every day
 // "0 10,44 14 ? 3 WED"     Fire at 2:10pm and at 2:44pm every Wednesday in the month of March.
 // "0 15 10 ? * MON-FRI"    Fire at 10:15am every Monday, Tuesday, Wednesday, Thursday and Friday
@@ -347,10 +349,7 @@ func (parser *CronExpressionParser) setDone(index int) {
 }
 
 func (parser *CronExpressionParser) lastSet(index int) bool {
-	if parser.lastDefined <= index {
-		return true
-	}
-	return false
+	return parser.lastDefined <= index
 }
 
 func (parser *CronExpressionParser) nextSeconds(prev int, field *CronField) string {
@@ -391,7 +390,8 @@ func (parser *CronExpressionParser) nextHours(prev int, field *CronField) string
 }
 
 func (parser *CronExpressionParser) nextDay(prevWeek int, weekField *CronField,
-	prevMonth int, monthField *CronField) int {
+	prevMonth int, monthField *CronField,
+) int {
 	var nextMonth int
 	if weekField.isEmpty() && monthField.isEmpty() && parser.lastSet(dayOfWeekIndex) {
 		if parser.dayBump {

@@ -2,7 +2,7 @@
 Simple durable and distributed scheduling library for go.
 
 ## About
-inspired by [go-quartz](https://github.com/reugn/go-quartz) and expanded to be able to run running in a distributed mode depending on the storage implementation.
+inspired by [go-quartz](https://github.com/reugn/go-quartz) and expanded to be able to run in a distributed mode depending on the storage implementation.
 
 ## How To
 

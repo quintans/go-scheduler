@@ -79,13 +79,6 @@ type Job interface {
 }
 ```
 
-Built-in job implementations:
-- `PrintJob` - Simple logging job (for demonstration)
-- `ShellJob` - Execute shell commands
-- `CurlJob` - Make HTTP requests
-
-> **Note:** These implementations exist primarily for demonstration purposes.
-
 #### Trigger Interface
 
 The Trigger interface is responsible for computing the next execution time:
@@ -180,6 +173,23 @@ Available storage implementations:
 
 ## Examples
 
+Consider the job:
+
+```go
+// PrintJob implements the scheduler.Job interface.
+type PrintJob struct {}
+
+func (pj PrintJob) Kind() string {
+	return "print"
+}
+
+// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
+func (PrintJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+	fmt.Println(string(st.Payload))
+	return st, nil
+}
+```
+
 ### Repeating Jobs
 
 ```go
@@ -188,30 +198,20 @@ sched := scheduler.NewStdScheduler(store)
 
 // Create a cron trigger that fires every 5 seconds
 cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")
-curlJob, err := scheduler.NewCurlJob(
-    "curl-clock",
-    http.MethodGet, 
-    "http://worldclockapi.com/api/json/est/now", 
-    "", 
-    nil,
-)
-if err != nil {
-    log.Fatal(err)
-}
+pj := &PrintJob{}
 
 // Register the job with its trigger
-sched.RegisterJob(curlJob, scheduler.WithTrigger(cronTrigger))
+sched.RegisterJob(pj, scheduler.WithTrigger(cronTrigger))
 
 ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
 sched.Start(ctx)
 
 // Schedule the job to start after the first delay
 delay, _ := cronTrigger.FirstDelay()
 // If this job is already scheduled by another process, it will be ignored
-sched.ScheduleJob(ctx, "curl-now", curlJob, scheduler.WithDelay(delay))
-
-time.Sleep(time.Second * 10)
-cancel()
+sched.ScheduleJob(ctx, "print-job", pj, scheduler.WithDelay(delay))
 ```
 
 ### One-time Jobs
@@ -222,24 +222,23 @@ conn := // ... your database connection
 store := postgres.New(conn)
 sched := scheduler.NewStdScheduler(store)
 
-cancelTxJob := scheduler.NewCancelTransactionJob()
+pj := &PrintJob{}
 // Register without a trigger for one-time execution
-sched.RegisterJob(cancelTxJob) 
+sched.RegisterJob(pj) 
 
 ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
 sched.Start(ctx)
 
 // Schedule a one-time job with a payload
 // If already scheduled by another process, it will be ignored
-err := sched.ScheduleJob(ctx, "cancel-tx", cancelTxJob, 
+err := sched.ScheduleJob(ctx, "print-job", pj, 
     scheduler.WithDelay(time.Second),
     scheduler.WithPayload([]byte("9bfadfd6-8e62-4c58-9b6e-636d666b6643")))
 if err != nil {
     log.Printf("Failed to schedule job: %v", err)
 }
-
-time.Sleep(time.Second * 5)
-cancel()
 ```
 
 ## Contributing

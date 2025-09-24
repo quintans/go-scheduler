@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"errors"
-	"net/http"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,35 +22,32 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 
 	backoff := trigger.NewExponentialBackoff(trigger.StdSchedulerIncBackoffOption(100 * time.Millisecond))
 
-	shellJob := scheduler.NewShellJob()
+	shellJob := &DummyJob{kind: "sh"}
+	goodCurlJob := &DummyJob{kind: "curl-good", err: nil}
+	badCurlJob := &DummyJob{kind: "curl-bad", err: errors.New("curl error")}
 
-	curlJob, err := scheduler.NewCurlJob("curl-good", http.MethodGet, "http://worldclockapi.com/api/json/est/now", "", nil)
-	require.NoError(t, err)
-
-	errCurlJob, err := scheduler.NewCurlJob("curl-bad", http.MethodGet, "http://", "", nil)
-	require.NoError(t, err)
 	// for repeating jobs, we provide a trigger
-	err = sched.RegisterJob(shellJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*700)))
+	err := sched.RegisterJob(shellJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*700)))
 	require.NoError(t, err)
-	err = sched.RegisterJob(errCurlJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*800)), scheduler.WithBackoff(backoff))
+	err = sched.RegisterJob(badCurlJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*800)), scheduler.WithBackoff(backoff))
 	require.NoError(t, err)
 	// to make a job run only once, we don't provide a trigger option
-	err = sched.RegisterJob(curlJob)
+	err = sched.RegisterJob(goodCurlJob)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// call start after registering all jobs
 	sched.Start(ctx)
 	// dynamic jobs, receive execution parameters though the payload argument
-	err = sched.ScheduleJob(ctx, "sh-good", shellJob, scheduler.WithDelay(time.Millisecond*700), scheduler.WithPayload([]byte("ls -la")))
+	err = sched.ScheduleJob(ctx, "sh-good", shellJob, scheduler.WithDelay(time.Millisecond*700), scheduler.WithPayload([]byte("OK")))
 	require.NoError(t, err)
-	err = sched.ScheduleJob(ctx, "sh-bad", shellJob, scheduler.WithDelay(time.Millisecond), scheduler.WithPayload([]byte("ls -z")))
+	err = sched.ScheduleJob(ctx, "sh-bad", shellJob, scheduler.WithDelay(time.Millisecond), scheduler.WithPayload([]byte("BAD")))
 	require.NoError(t, err)
 
 	// static jobs, that execute always the same task, usually don't provide payload
-	err = sched.ScheduleJob(ctx, "curl-good", curlJob, scheduler.WithDelay(time.Millisecond))
+	err = sched.ScheduleJob(ctx, "curl-good", goodCurlJob, scheduler.WithDelay(time.Millisecond))
 	require.NoError(t, err)
-	err = sched.ScheduleJob(ctx, "curl-bad", errCurlJob, scheduler.WithDelay(time.Millisecond*800))
+	err = sched.ScheduleJob(ctx, "curl-bad", badCurlJob, scheduler.WithDelay(time.Millisecond*800))
 	require.NoError(t, err)
 
 	time.Sleep(4 * time.Second)
@@ -81,4 +80,38 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	st, err = store.Get(ctx, "curl-bad")
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
+}
+
+// DummyJob implements the scheduler.Job interface.
+type DummyJob struct {
+	kind string
+	err  error
+}
+
+func (pj DummyJob) Kind() string {
+	return pj.kind
+}
+
+// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
+func (pj DummyJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+	if pj.err != nil {
+		return nil, pj.err
+	}
+	if string(st.Payload) == "BAD" {
+		return nil, errors.New("bad command")
+	}
+
+	splits := strings.Split(string(st.Payload), "#")
+	if len(splits) == 1 {
+		st.Payload = fmt.Appendf(nil, "%s#1", st.Payload)
+	} else {
+		count, err := strconv.Atoi(splits[1])
+		if err != nil {
+			return nil, err
+		}
+		count++
+		st.Payload = fmt.Appendf(nil, "%s#%d", splits[0], count)
+	}
+
+	return st, nil
 }

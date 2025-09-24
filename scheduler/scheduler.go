@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -50,59 +49,15 @@ func (m *knownTasks) get(jobKind string) *Task {
 	return m.tasks[jobKind]
 }
 
-// Job represents the work to be performed.
-type Job interface {
-	// Kind returns the type of the job.
-	Kind() string
-	// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-	// If a nil StoreTask is returned, it will be removed from the scheduler.
-	// If an error is returned it will be rescheduled with a backoff.
-	Execute(context.Context, *StoreTask) (*StoreTask, error)
-}
-
 type Task struct {
 	Job     Job
 	Trigger trigger.Trigger
 	Backoff trigger.Backoff
 }
 
-type StoreTask struct {
-	Slug    string
-	Kind    string
-	Payload []byte
-	When    time.Time
-	Version int64
-	Retry   int
-	Result  string
-}
-
-func (s *StoreTask) IsOK() bool {
-	return s.Retry == 0
-}
-
 type ScheduledJob struct {
 	Job         Job
 	NextRunTime time.Time
-}
-
-// JobStore represents the store for the jobs to be executed
-type JobStore interface {
-	// Create schedule a new task
-	Create(context.Context, *StoreTask) error
-	// NextRun finds the next run time
-	NextRun(context.Context) (*StoreTask, error)
-	// Lock find and locks a the next task to be run
-	Lock(context.Context, *StoreTask) (*StoreTask, error)
-	// Reschedule releases the acquired lock and updates the data for the next run
-	Reschedule(context.Context, *StoreTask) error
-	// GetSlugs gets all the slugs
-	GetSlugs(context.Context) ([]string, error)
-	// Get gets a stored task
-	Get(ctx context.Context, slug string) (*StoreTask, error)
-	// Delete deletes a stored task
-	Delete(ctx context.Context, slug string) error
-	// Clear all the tasks
-	Clear(context.Context) error
 }
 
 // A Scheduler is the Jobs orchestrator.
@@ -164,26 +119,6 @@ func WithPayload(payload []byte) ScheduleJobOption {
 	return func(options *ScheduleJobOptions) {
 		options.Payload = payload
 	}
-}
-
-type Logger interface {
-	Error(format string, args ...interface{})
-	Warn(format string, args ...interface{})
-	Info(format string, args ...interface{})
-}
-
-type myLogger struct{}
-
-func (myLogger) Error(format string, args ...interface{}) {
-	log.Printf("ERROR "+format, args...)
-}
-
-func (myLogger) Warn(format string, args ...interface{}) {
-	log.Printf("WARN "+format, args...)
-}
-
-func (myLogger) Info(format string, args ...interface{}) {
-	log.Printf("INFO "+format, args...)
 }
 
 var _ Scheduler = (*StdScheduler)((nil))
@@ -278,7 +213,7 @@ func (s *StdScheduler) Start(ctx context.Context) {
 	}
 }
 
-// GetJobKeys returns the keys of all of the scheduled jobs.
+// GetJobSlugs returns the slugs of all of the scheduled jobs.
 func (s *StdScheduler) GetJobSlugs(ctx context.Context) ([]string, error) {
 	return s.store.GetSlugs(ctx)
 }

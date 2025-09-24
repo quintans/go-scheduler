@@ -109,7 +109,7 @@ type JobStore interface {
 // Schedulers responsible for executing Jobs when their associated Triggers fire (when their scheduled time arrives).
 type Scheduler interface {
 	// RegisterJob registers the job and trigger
-	// Fails with ErrJobAlreadyScheduled if job already registered.
+	// Fails with ErrJobAlreadyExists if job already registered.
 	//
 	// This should be used to register the jobs before starting the scheduler.
 	RegisterJob(job Job, options ...RegisterJobOption) error

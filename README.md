@@ -2,10 +2,6 @@
 
 A simple, durable, and distributed job scheduling library for Go.
 
-## Overview
-
-This library is inspired by [go-quartz](https://github.com/reugn/go-quartz) and has been expanded to support distributed operation across multiple instances, depending on the storage backend implementation.
-
 ## Key Features
 
 - **Distributed Operation**: Run multiple scheduler instances with automatic coordination
@@ -37,26 +33,20 @@ import (
 
 func main() {
     // Create a memory store and scheduler
-    store := memory.New()
-    sched := scheduler.NewStdScheduler(store)
+    ctx := context.Background()
+    store := memory.New() // there are others
+    sched := scheduler.NewScheduler(store)
     
-    // Create and register a shell job
-    shellJob := scheduler.NewShellJob()
+    // Create and register a shell (fictional) job
+    shellJob := NewShellJob()
     cronTrigger, _ := trigger.NewCronTrigger("@every 30s")
-    sched.RegisterJob(shellJob, scheduler.WithTrigger(cronTrigger))
-    
-    // Start the scheduler
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-    sched.Start(ctx)
-    
     // Schedule a job to run a command
-    sched.ScheduleJob(ctx, "hello-world", shellJob, 
-        scheduler.WithDelay(time.Second),
-        scheduler.WithPayload([]byte("echo 'Hello, World!'")))
-    
-    // Let it run for a minute
-    time.Sleep(time.Minute)
+    sched.ScheduleJob(ctx, "hello-world", shellJob, cronTrigger)
+
+    // Start the scheduler
+    sched.Start(ctx, 1)
+
+    // ...
 }
 ```
 
@@ -70,8 +60,6 @@ The Job interface is responsible for executing the actual work:
 
 ```go
 type Job interface {
-    // Kind returns the type of the job.
-    Kind() string
     // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
     // If a nil StoreTask is returned, it will be removed from the scheduler.
     // If an error is returned it will be rescheduled with a backoff.
@@ -86,52 +74,10 @@ The Trigger interface is responsible for computing the next execution time:
 ```go
 // Triggers are the 'mechanism' by which Jobs are scheduled.
 type Trigger interface {
-    // NextFireTime returns the next time at which the Trigger is scheduled to fire.
-    NextFireTime(prev time.Time) (time.Time, error)
+    // Next returns the next trigger time.
+    Next(prev time.Time) time.Time
 }
 ```
-
-Available trigger implementations:
-- `CronTrigger` - Unix cron-style scheduling
-- `SimpleTrigger` - Simple interval-based scheduling
-
-#### Scheduler Interface
-
-The Scheduler interface orchestrates job execution:
-
-```go
-// A Scheduler orchestrates job execution.
-// Schedulers are responsible for executing Jobs when their associated Triggers fire.
-type Scheduler interface {
-	// RegisterJob registers a job and its trigger.
-	// Returns ErrJobAlreadyExists if the job is already registered.
-	// This should be called before starting the scheduler.
-	RegisterJob(job Job, options ...RegisterJobOption) error
-	
-	// Start begins the scheduler's execution loop.
-	Start(context.Context)
-	
-	// ScheduleJob schedules a specific job instance for execution.
-	// Returns ErrJobAlreadyScheduled if already scheduled by another process.
-	// The job must be registered first and will be picked up by any running instance.
-	ScheduleJob(ctx context.Context, slug string, job Job, options ...ScheduleJobOption) error
-	
-	// GetJobSlugs returns all scheduled job identifiers.
-	GetJobSlugs(context.Context) ([]string, error)
-	
-	// GetScheduledJob retrieves metadata for a scheduled job.
-	GetScheduledJob(ctx context.Context, slug string) (*ScheduledJob, error)
-	
-	// DeleteJob removes a job from the execution queue.
-	DeleteJob(ctx context.Context, slug string) error
-	
-	// Clear removes all scheduled jobs.
-	Clear(context.Context) error
-}
-```
-
-Available scheduler implementations:
-- `StdScheduler` - Standard scheduler with configurable heartbeat and jitter
 
 #### JobStore Interface
 
@@ -179,10 +125,6 @@ Consider the job:
 // PrintJob implements the scheduler.Job interface.
 type PrintJob struct {}
 
-func (pj PrintJob) Kind() string {
-	return "print"
-}
-
 // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
 func (PrintJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
 	fmt.Println(string(st.Payload))
@@ -193,54 +135,43 @@ func (PrintJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.
 ### Repeating Jobs
 
 ```go
+ctx := context.Background()
 store := memory.New()
-sched := scheduler.NewStdScheduler(store)
+sched := scheduler.NewScheduler(store)
 
 // Create a cron trigger that fires every 5 seconds
 cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")
 pj := &PrintJob{}
 
-// Register the job with its trigger
-sched.RegisterJob(pj, scheduler.WithTrigger(cronTrigger))
-
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
+// If this job is already scheduled by another process, it will be ignored
+sched.ScheduleJob(ctx, "print-job", pj, cronTrigger)
 
 sched.Start(ctx)
-
-// Schedule the job to start after the first delay
-delay, _ := cronTrigger.FirstDelay()
-// If this job is already scheduled by another process, it will be ignored
-sched.ScheduleJob(ctx, "print-job", pj, scheduler.WithDelay(delay))
 ```
 
-### One-time Jobs
+### One-off Jobs
 
 ```go
-// conn is your database connection
-conn := // ... your database connection
-store := postgres.New(conn)
-sched := scheduler.NewStdScheduler(store)
+ctx := context.Background()
+store := // ...
+sched := scheduler.NewScheduler(store)
 
 pj := &PrintJob{}
-// Register without a trigger for one-time execution
-sched.RegisterJob(pj) 
-
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
+// Register for one-off execution
+sched.RegisterOneOffJob("print-job", pj) 
 
 sched.Start(ctx)
 
-// Schedule a one-time job with a payload
+// Schedule a one-off job with a payload
 // If already scheduled by another process, it will be ignored
-err := sched.ScheduleJob(ctx, "print-job", pj, 
-    scheduler.WithDelay(time.Second),
-    scheduler.WithPayload([]byte("9bfadfd6-8e62-4c58-9b6e-636d666b6643")))
-if err != nil {
-    log.Printf("Failed to schedule job: %v", err)
-}
+sched.ScheduleOneOffJob(
+    ctx, 
+    "print-job:"+uuid.NewString(), 
+    time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+    []byte("9bfadfd6-8e62-4c58-9b6e-636d666b6643"),
+)
 ```
 
-## Contributing
+## Acknowledgements
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This library is inspired by [go-quartz](https://github.com/reugn/go-quartz) and has been expanded to support distributed operation across multiple instances, depending on the storage backend implementation.

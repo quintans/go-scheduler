@@ -288,5 +288,5 @@ Follow idiomatic Go practices and community standards when writing Go code. Thes
 - Not understanding nil interfaces vs nil pointers
 - Forgetting to close resources (files, connections)
 - Using global variables unnecessarily
-- Over-using empty interfaces (`interface{}`)
+- Over-using empty interfaces (`any`)
 - Not considering the zero value of types

@@ -15,69 +15,67 @@ import (
 )
 
 func testScheduler(t *testing.T, store scheduler.JobStore) {
-	sched := scheduler.NewStdScheduler(
+	sched := scheduler.NewScheduler(
 		store,
-		scheduler.StdSchedulerHeartbeatOption(time.Second),
+		scheduler.HeartbeatOption(time.Second),
 	)
 
 	backoff := trigger.NewExponentialBackoff(trigger.StdSchedulerIncBackoffOption(100 * time.Millisecond))
 
-	shellJob := &DummyJob{kind: "sh"}
-	goodCurlJob := &DummyJob{kind: "curl-good", err: nil}
-	badCurlJob := &DummyJob{kind: "curl-bad", err: errors.New("curl error")}
+	goodJob := &DummyJob{kind: "curl-good", err: nil}
+	badJob := &DummyJob{kind: "curl-bad", err: errors.New("curl error")}
 
-	// for repeating jobs, we provide a trigger
-	err := sched.RegisterJob(shellJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*700)))
+	ctx := t.Context()
+	// for static (repeating) jobs,  we provide a trigger. We usually don't provide payload
+	err := sched.ScheduleJob(ctx, "good-job", goodJob, trigger.NewSimpleTrigger(time.Millisecond*700))
 	require.NoError(t, err)
-	err = sched.RegisterJob(badCurlJob, scheduler.WithTrigger(trigger.NewSimpleTrigger(time.Millisecond*800)), scheduler.WithBackoff(backoff))
+	err = sched.ScheduleJob(ctx, "bad-job", badJob, trigger.NewSimpleTrigger(time.Millisecond*800), scheduler.WithBackoff(backoff))
 	require.NoError(t, err)
-	// to make a job run only once, we don't provide a trigger option
-	err = sched.RegisterJob(goodCurlJob)
+	// one off
+	err = sched.RegisterOneOffJob("good-job-oo", goodJob)
+	require.NoError(t, err)
+	err = sched.RegisterOneOffJob("bad-job-oo", badJob)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// call start after registering all jobs
-	sched.Start(ctx)
-	// dynamic jobs, receive execution parameters though the payload argument
-	err = sched.ScheduleJob(ctx, "sh-good", shellJob, scheduler.WithDelay(time.Millisecond*700), scheduler.WithPayload([]byte("OK")))
-	require.NoError(t, err)
-	err = sched.ScheduleJob(ctx, "sh-bad", shellJob, scheduler.WithDelay(time.Millisecond), scheduler.WithPayload([]byte("BAD")))
-	require.NoError(t, err)
+	sched.Start(ctx, 1)
 
-	// static jobs, that execute always the same task, usually don't provide payload
-	err = sched.ScheduleJob(ctx, "curl-good", goodCurlJob, scheduler.WithDelay(time.Millisecond))
+	// dynamic jobs, receive execution parameters though the payload argument
+	now := time.Now()
+	err = sched.ScheduleOneOffJob(ctx, "good-job-oo:1", now.Add(time.Millisecond*700), []byte("OK"))
 	require.NoError(t, err)
-	err = sched.ScheduleJob(ctx, "curl-bad", badCurlJob, scheduler.WithDelay(time.Millisecond*800))
+	err = sched.ScheduleOneOffJob(ctx, "bad-job-oo:1", now.Add(time.Millisecond), []byte("BAD"))
 	require.NoError(t, err)
 
 	time.Sleep(4 * time.Second)
 	scheduledJobKeys, err := sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"sh-bad", "curl-bad", "sh-good"}, scheduledJobKeys)
+	require.ElementsMatch(t, []string{"bad-job", "good-job", "bad-job-oo:1"}, scheduledJobKeys)
 
-	_, err = sched.GetScheduledJob(ctx, "sh-good")
+	_, err = sched.GetScheduledJob(ctx, "good-job")
 	require.NoError(t, err)
-	st, err := store.Get(ctx, "sh-good")
+	st, err := store.Get(ctx, "good-job")
 	require.NoError(t, err)
 	require.True(t, st.IsOK())
 
-	err = sched.DeleteJob(ctx, "sh-good")
+	err = sched.DeleteJob(ctx, "good-job")
 	require.NoError(t, err)
-	_, err = store.Get(ctx, "sh-good")
+	_, err = store.Get(ctx, "good-job")
 	require.True(t, errors.Is(err, scheduler.ErrJobNotFound))
 
 	scheduledJobKeys, err = sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"curl-bad", "sh-bad"}, scheduledJobKeys)
+	require.ElementsMatch(t, []string{"bad-job", "bad-job-oo:1"}, scheduledJobKeys)
 
 	cancel()
 	ctx = context.Background()
 
-	st, err = store.Get(ctx, "sh-bad")
+	st, err = store.Get(ctx, "bad-job")
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
 
-	st, err = store.Get(ctx, "curl-bad")
+	st, err = store.Get(ctx, "bad-job-oo:1")
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
 }

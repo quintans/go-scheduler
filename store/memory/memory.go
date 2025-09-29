@@ -28,6 +28,12 @@ func (s *MemStore) Create(_ context.Context, task *scheduler.StoreTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	for _, entry := range *s.queue {
+		if entry.Slug == task.Slug {
+			return fmt.Errorf("create task '%s': %w", task.Slug, scheduler.ErrJobAlreadyExists)
+		}
+	}
+
 	heap.Push(s.queue, &MemEntry{
 		StoreTask: task,
 	})
@@ -170,7 +176,7 @@ func (pq PriorityQueue) Swap(i, j int) {
 
 // Push implements the heap.Interface.Push.
 // Adds x as element Len().
-func (pq *PriorityQueue) Push(x interface{}) {
+func (pq *PriorityQueue) Push(x any) {
 	n := len(*pq)
 	entry := x.(*MemEntry)
 	entry.index = n
@@ -179,7 +185,7 @@ func (pq *PriorityQueue) Push(x interface{}) {
 
 // Pop implements the heap.Interface.Pop.
 // Removes and returns element Len() - 1.
-func (pq *PriorityQueue) Pop() interface{} {
+func (pq *PriorityQueue) Pop() any {
 	old := *pq
 	n := len(old)
 	entry := old[n-1]

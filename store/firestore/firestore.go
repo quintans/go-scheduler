@@ -22,7 +22,6 @@ var errOptimisticLocking = errors.New("job was changed by another process")
 
 type Entry struct {
 	Slug        string    `firestore:"slug"`
-	Kind        string    `firestore:"kind"`
 	Payload     []byte    `firestore:"payload,omitempty"`
 	When        time.Time `firestore:"run_at"`
 	Version     int64     `firestore:"version"`
@@ -46,7 +45,6 @@ func (e *Entry) IsUnlocked(t time.Time) bool {
 func toEntry(t *scheduler.StoreTask) *Entry {
 	return &Entry{
 		Slug:    t.Slug,
-		Kind:    t.Kind,
 		Payload: t.Payload,
 		When:    t.When.UTC(),
 		Version: t.Version,
@@ -61,7 +59,6 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 	}
 	return &scheduler.StoreTask{
 		Slug:    e.Slug,
-		Kind:    e.Kind,
 		Payload: e.Payload,
 		When:    e.When.UTC(),
 		Version: e.Version,

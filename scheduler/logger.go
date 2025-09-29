@@ -5,21 +5,21 @@ import (
 )
 
 type Logger interface {
-	Error(format string, args ...interface{})
-	Warn(format string, args ...interface{})
-	Info(format string, args ...interface{})
+	Error(format string, args ...any)
+	Warn(format string, args ...any)
+	Info(format string, args ...any)
 }
 
 type myLogger struct{}
 
-func (myLogger) Error(format string, args ...interface{}) {
+func (myLogger) Error(format string, args ...any) {
 	log.Printf("ERROR "+format, args...)
 }
 
-func (myLogger) Warn(format string, args ...interface{}) {
+func (myLogger) Warn(format string, args ...any) {
 	log.Printf("WARN "+format, args...)
 }
 
-func (myLogger) Info(format string, args ...interface{}) {
+func (myLogger) Info(format string, args ...any) {
 	log.Printf("INFO "+format, args...)
 }

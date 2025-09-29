@@ -22,7 +22,6 @@ const defaultLockDuration = 5 * time.Minute
 
 type Entry struct {
 	Slug    string    `db:"slug"`
-	Kind    string    `db:"kind"`
 	Payload []byte    `db:"payload"`
 	When    time.Time `db:"run_at"`
 	Version int64     `db:"version"`
@@ -33,7 +32,6 @@ type Entry struct {
 func toEntry(t *scheduler.StoreTask) *Entry {
 	return &Entry{
 		Slug:    t.Slug,
-		Kind:    t.Kind,
 		Payload: t.Payload,
 		When:    t.When.UTC(),
 		Version: t.Version,
@@ -48,7 +46,6 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 	}
 	return &scheduler.StoreTask{
 		Slug:    e.Slug,
-		Kind:    e.Kind,
 		Payload: e.Payload,
 		When:    e.When.UTC(),
 		Version: e.Version,
@@ -90,8 +87,8 @@ func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toEntry(task)
 	_, err := s.db.NamedExecContext(
 		ctx,
-		fmt.Sprintf(`INSERT INTO %s (slug, kind, payload, run_at, version, retry, result, locked_until)
-		VALUES (:slug, :kind, :payload, :run_at, :version, :retry, :result, NULL)`, s.tableName),
+		fmt.Sprintf(`INSERT INTO %s (slug, payload, run_at, version, retry, result, locked_until)
+		VALUES (:slug, :payload, :run_at, :version, :retry, :result, NULL)`, s.tableName),
 		entry,
 	)
 	if err == nil {
@@ -109,7 +106,7 @@ func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	now := time.Now().UTC()
 	entry := &Entry{}
-	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT slug, kind, payload, run_at, version, retry, result FROM %s
+	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT slug, payload, run_at, version, retry, result FROM %s
 	WHERE locked_until IS NULL OR locked_until < $1
 	ORDER BY run_at
 	ASC LIMIT 1`,
@@ -157,7 +154,7 @@ func (s *Store) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask)
 		return nil, scheduler.ErrJobNotLocked
 	}
 
-	entry := *task
+	entry := *task // copy
 	entry.Version++
 
 	return &entry, nil
@@ -197,7 +194,7 @@ func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 
 func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
 	entry := &Entry{}
-	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT slug, kind, payload, run_at, version, retry, result FROM %s WHERE slug = $1", s.tableName), slug)
+	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT slug, payload, run_at, version, retry, result FROM %s WHERE slug = $1", s.tableName), slug)
 	if err == nil {
 		return fromEntry(entry), nil
 	}

@@ -19,31 +19,56 @@ import (
 func TestScheduler(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := memory.New()
-		sched := scheduler.NewStdScheduler(store)
+		sched := scheduler.NewScheduler(store)
 
-		printJob := &DummyJob{kind: "print-once"}
-		sched.RegisterJob(printJob)
-
-		cronTrigger, _ := trigger.NewCronTrigger("1/3 * * * * *")
-		cronJob := &DummyJob{kind: "print-cron"}
-		err := sched.RegisterJob(cronJob, scheduler.WithTrigger(cronTrigger))
+		// ALL jobs need to be registered before starting the scheduler
+		// otherwise they will not be picked up by any of the concurrent processes
+		printJob := &DummyJob{}
+		// on demand job, not required to run on startup, therefore not scheduled,
+		// but still needs to be registered
+		err := sched.RegisterOneOffJob("ad-hoc", printJob)
+		require.NoError(t, err)
+		err = sched.RegisterOneOffJob("first", printJob)
+		require.NoError(t, err)
+		err = sched.RegisterOneOffJob("second", printJob)
+		require.NoError(t, err)
+		err = sched.RegisterOneOffJob("third", printJob)
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		sched.Start(ctx)
 
-		sched.ScheduleJob(ctx, "ad-hoc", printJob, scheduler.WithDelay(time.Second*5), scheduler.WithPayload([]byte("Ad hoc Job")))
-		sched.ScheduleJob(ctx, "first", printJob, scheduler.WithDelay(time.Second*12), scheduler.WithPayload([]byte("First job")))
-		sched.ScheduleJob(ctx, "second", printJob, scheduler.WithDelay(time.Second*6), scheduler.WithPayload([]byte("Second job")))
-		sched.ScheduleJob(ctx, "third", printJob, scheduler.WithDelay(time.Second*3), scheduler.WithPayload([]byte("Third job")))
-		delay, err := cronTrigger.FirstDelay()
+		cronTrigger, err := trigger.NewCronTrigger("1/3 * * * * *")
 		require.NoError(t, err)
-		sched.ScheduleJob(ctx, "print-cron", cronJob, scheduler.WithDelay(delay), scheduler.WithPayload([]byte("Cron job")))
+		when := cronTrigger.Next(time.Now())
+		err = sched.ScheduleJob(
+			ctx, "print-cron", printJob,
+			cronTrigger,
+			scheduler.WithWhen(when),
+			scheduler.WithPayload([]byte("Cron job")),
+		)
+		require.NoError(t, err)
+
+		sched.Start(ctx, 1)
+
+		// after start we schedule one-off jobs, but it is essential that the job is already registered
+
+		// we don't specify the trigger here since it is already registered, but we could override it if we wanted to
+		// by specifying it here
+		// the same applies to backoff, if we wanted to override the registered backoff
+		now := time.Now()
+		err = sched.ScheduleOneOffJob(ctx, "ad-hoc:1", now.Add(time.Second*5), []byte("Ad hoc Job"))
+		require.NoError(t, err)
+		err = sched.ScheduleOneOffJob(ctx, "first:1", now.Add(time.Second*12), []byte("First job"))
+		require.NoError(t, err)
+		err = sched.ScheduleOneOffJob(ctx, "second:1", now.Add(time.Second*6), []byte("Second job"))
+		require.NoError(t, err)
+		err = sched.ScheduleOneOffJob(ctx, "third:1", now.Add(time.Second*3), []byte("Third job"))
+		require.NoError(t, err)
 
 		slugs, err := sched.GetJobSlugs(ctx)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"ad-hoc", "first", "second", "third", "print-cron"}, slugs)
+		assert.ElementsMatch(t, []string{"ad-hoc:1", "first:1", "second:1", "third:1", "print-cron"}, slugs)
 
 		time.Sleep(time.Second * 10)
 
@@ -52,7 +77,7 @@ func TestScheduler(t *testing.T) {
 
 		slugs, err = sched.GetJobSlugs(ctx)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"first", "print-cron"}, slugs)
+		assert.ElementsMatch(t, []string{"first:1", "print-cron"}, slugs)
 
 		st, err := store.Get(ctx, "print-cron")
 		require.NoError(t, err)
@@ -63,18 +88,24 @@ func TestScheduler(t *testing.T) {
 
 		slugs, err = sched.GetJobSlugs(ctx)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"first"}, slugs)
+		assert.ElementsMatch(t, []string{"first:1"}, slugs)
 	})
 }
 
-// DummyJob implements the scheduler.Job interface.
-type DummyJob struct {
-	kind string
+func TestConcurrentScheduling(t *testing.T) {
+	store := memory.New()
+	sched1 := scheduler.NewScheduler(store)
+	sched2 := scheduler.NewScheduler(store)
+
+	printJob := &DummyJob{}
+	err := sched1.ScheduleJob(t.Context(), "print", printJob, trigger.NewSimpleTrigger(time.Millisecond*500))
+	require.NoError(t, err)
+	err = sched2.ScheduleJob(t.Context(), "print", printJob, trigger.NewSimpleTrigger(time.Millisecond*500))
+	require.NoError(t, err)
 }
 
-func (pj DummyJob) Kind() string {
-	return pj.kind
-}
+// DummyJob implements the scheduler.Job interface.
+type DummyJob struct{}
 
 // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
 func (pj DummyJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {

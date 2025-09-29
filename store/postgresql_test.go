@@ -102,7 +102,6 @@ func dbSchema(db *sqlx.DB) {
 	db.MustExec(`
 	CREATE TABLE IF NOT EXISTS schedules(
 		slug VARCHAR (100) PRIMARY KEY,
-		kind VARCHAR (100) NOT NULL,
 		payload bytea,
 		run_at TIMESTAMP NOT NULL,
 		version INTEGER NOT NULL,

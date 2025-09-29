@@ -27,7 +27,6 @@ type JobStore interface {
 
 type StoreTask struct {
 	Slug    string
-	Kind    string
 	Payload []byte
 	When    time.Time
 	Version int64

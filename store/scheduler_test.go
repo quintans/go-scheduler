@@ -58,6 +58,8 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	st, err := store.Get(ctx, "good-job")
 	require.NoError(t, err)
 	require.True(t, st.IsOK())
+	// the trigger expression must survive the store round trip
+	require.Equal(t, "@every 700ms", st.Trigger)
 
 	err = sched.DeleteJob(ctx, "good-job")
 	require.NoError(t, err)

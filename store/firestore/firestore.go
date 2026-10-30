@@ -27,6 +27,7 @@ type Entry struct {
 	Version     int64     `firestore:"version"`
 	Retry       int       `firestore:"retry,omitempty"`
 	Result      string    `firestore:"result,omitempty"`
+	Trigger     string    `firestore:"trigger_expr,omitempty"`
 	LockedUntil time.Time `firestore:"locked_until"`
 }
 
@@ -50,6 +51,7 @@ func toEntry(t *scheduler.StoreTask) *Entry {
 		Version: t.Version,
 		Retry:   t.Retry,
 		Result:  t.Result,
+		Trigger: t.Trigger,
 	}
 }
 
@@ -64,6 +66,7 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 		Version: e.Version,
 		Retry:   e.Retry,
 		Result:  e.Result,
+		Trigger: e.Trigger,
 	}
 }
 
@@ -150,8 +153,10 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 }
 
 func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
-	e, err := s.update(ctx, task.Slug, task.Version, func(_ *Entry) (*Entry, error) {
+	e, err := s.update(ctx, task.Slug, task.Version, func(old *Entry) (*Entry, error) {
 		e := toEntry(task)
+		// the trigger expression is owned by the store and may have been edited there
+		e.Trigger = old.Trigger
 		e.Lock(s.lockDuration)
 		return e, nil
 	})
@@ -162,8 +167,10 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 }
 
 func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
-	_, err := s.update(ctx, task.Slug, task.Version, func(_ *Entry) (*Entry, error) {
+	_, err := s.update(ctx, task.Slug, task.Version, func(old *Entry) (*Entry, error) {
 		e := toEntry(task)
+		// the trigger expression is owned by the store and may have been edited there
+		e.Trigger = old.Trigger
 		e.Unlock()
 		return e, nil
 	})

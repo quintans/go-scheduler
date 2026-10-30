@@ -8,6 +8,7 @@ import (
 )
 
 type CronTrigger struct {
+	expr     string
 	schedule cron.Schedule
 }
 
@@ -21,9 +22,14 @@ func NewCronTrigger(expr string) (*CronTrigger, error) {
 		return nil, fmt.Errorf("failed to parse cron expression: %w", err)
 	}
 
-	return &CronTrigger{schedule}, nil
+	return &CronTrigger{expr: expr, schedule: schedule}, nil
 }
 
 func (ct *CronTrigger) Next(prev time.Time) time.Time {
 	return ct.schedule.Next(prev)
+}
+
+// Expression returns the cron expression used to build the trigger.
+func (ct *CronTrigger) Expression() string {
+	return ct.expr
 }

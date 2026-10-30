@@ -32,6 +32,9 @@ type StoreTask struct {
 	Version int64
 	Retry   int
 	Result  string
+	// Trigger is the string expression of the trigger used to schedule this task, if any.
+	// It is set when the task is created and can be parsed with trigger.Parse.
+	Trigger string
 }
 
 func (s *StoreTask) IsOK() bool {

@@ -5,7 +5,7 @@ A simple, durable, and distributed job scheduling library for Go.
 ## Key Features
 
 - **Distributed Operation**: Run multiple scheduler instances with automatic coordination
-- **Pluggable Storage**: Support for in-memory, PostgreSQL, and Firestore backends
+- **Pluggable Storage**: Support for in-memory, PostgreSQL, Firestore, and MongoDB backends
 - **Cron Support**: Full Unix cron expression support with special shortcuts
 - **Error Handling**: Automatic retry with configurable backoff strategies
 - **Context Support**: Graceful shutdown with Go's context cancellation
@@ -116,6 +116,7 @@ Available storage implementations:
 - `Memory` - In-memory storage (single instance only)
 - `PostgreSQL` - PostgreSQL with advisory locking for distributed coordination
 - `Firestore` - Google Cloud Firestore for distributed coordination
+- `MongoDB` - MongoDB with versioned atomic updates for distributed coordination (no replica set required; call `CreateIndexes` once to create the index used to find the next run)
 
 ## Examples
 
@@ -146,7 +147,7 @@ pj := &PrintJob{}
 // If this job is already scheduled by another process, it will be ignored
 sched.ScheduleJob(ctx, "print-job", pj, cronTrigger)
 
-sched.Start(ctx)
+sched.Start(ctx, 1)
 ```
 
 ### Loading the Trigger from the Store
@@ -171,7 +172,7 @@ sched.LoadScheduleJob(ctx, "print-job", &PrintJob{}, defaultTrigger)
 sched.Start(ctx, 1)
 ```
 
-For the PostgreSQL store this requires a `trigger_expr TEXT` column in the schedules table.
+For the PostgreSQL store this requires a `trigger_expr TEXT` column in the schedules table. The MongoDB store persists it in the `trigger_expr` field.
 
 ### One-off Jobs
 
@@ -184,7 +185,7 @@ pj := &PrintJob{}
 // Register for one-off execution
 sched.RegisterOneOffJob("print-job", pj) 
 
-sched.Start(ctx)
+sched.Start(ctx, 1)
 
 // Schedule a one-off job with a payload
 // If already scheduled by another process, it will be ignored

@@ -35,8 +35,8 @@ func Parse(expr string) (Trigger, error) {
 		return nil, errors.New("empty trigger expression")
 	}
 
-	if strings.HasPrefix(expr, everyPrefix) {
-		interval, err := time.ParseDuration(strings.TrimSpace(strings.TrimPrefix(expr, everyPrefix)))
+	if after, ok := strings.CutPrefix(expr, everyPrefix); ok {
+		interval, err := time.ParseDuration(strings.TrimSpace(after))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse trigger expression '%s': %w", expr, err)
 		}

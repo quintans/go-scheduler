@@ -21,8 +21,10 @@ var (
 	ErrInvalidOneOffJobSlug = errors.New("invalid one-off job slug format")
 )
 
-const waitOnCalculateNextRunError = 10 * time.Second
-const oneOffSlugSeparator = ":"
+const (
+	waitOnCalculateNextRunError = 10 * time.Second
+	oneOffSlugSeparator         = ":"
+)
 
 type knownTasks struct {
 	mu    sync.RWMutex
@@ -59,6 +61,9 @@ type Task struct {
 	Trigger trigger.Trigger
 	Backoff trigger.Backoff
 	OneOff  bool
+	// TriggerFromStore indicates that the trigger expression stored with the task takes precedence over Trigger.
+	// It is re-read on every execution, so changes made directly in the store are picked up on the next run.
+	TriggerFromStore bool
 }
 
 type ScheduledJob struct {
@@ -143,6 +148,40 @@ func WithPayload(payload []byte) ScheduleJobOption {
 	}
 }
 
+// LoadScheduleJob loads a job from the store and schedules it to be run.
+// It will parse the trigger from the store and use it to determine when to run the job.
+// If the job is not found in the store, or the stored task has no trigger expression,
+// it will be scheduled with the provided default trigger.
+//
+// The stored trigger expression is re-read on every execution, so changing it directly
+// in the store updates the job schedule from its next run onwards, without changing the code.
+// This should be used before Start.
+func (s *Scheduler) LoadScheduleJob(ctx context.Context, slug string, job Job, defaultTrigger trigger.Trigger, options ...ScheduleJobOption) error {
+	if s.running {
+		return fmt.Errorf("cannot load job after scheduler has started job: '%s'", slug)
+	}
+
+	trg := defaultTrigger
+	storedTask, err := s.store.Get(ctx, slug)
+	switch {
+	case errors.Is(err, ErrJobNotFound):
+		// not stored yet, the default trigger will be used
+	case err != nil:
+		return fmt.Errorf("failed to load job '%s' from store: %w", slug, err)
+	case storedTask.Trigger != "":
+		trg, err = trigger.Parse(storedTask.Trigger)
+		if err != nil {
+			return fmt.Errorf("failed to parse stored trigger for job '%s': %w", slug, err)
+		}
+	}
+
+	return s.scheduleTask(ctx, slug, &Task{
+		Job:              job,
+		Trigger:          trg,
+		TriggerFromStore: true,
+	}, options...)
+}
+
 // ScheduleJob schedules a recurring job to be run.
 // This should be used before Start.
 func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, job Job, trg trigger.Trigger, options ...ScheduleJobOption) error {
@@ -150,35 +189,40 @@ func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, job Job, trg t
 		return fmt.Errorf("cannot schedule job after scheduler has started job: '%s'", slug)
 	}
 
+	return s.scheduleTask(ctx, slug, &Task{
+		Job:     job,
+		Trigger: trg,
+	}, options...)
+}
+
+func (s *Scheduler) scheduleTask(ctx context.Context, slug string, task *Task, options ...ScheduleJobOption) error {
 	opts := ScheduleJobOptions{
 		Backoff: trigger.NewExponentialBackoff(),
 	}
 	for _, o := range options {
 		o(&opts)
 	}
+	task.Backoff = opts.Backoff
 
-	if err := s.registry.add(slug, &Task{
-		Job:     job,
-		Trigger: trg,
-		Backoff: opts.Backoff,
-	}); err != nil {
+	if err := s.registry.add(slug, task); err != nil {
 		return fmt.Errorf("failed to register job: %w", err)
 	}
 
 	when := opts.When
 	if when.IsZero() {
-		when = trg.Next(time.Now())
+		when = task.Trigger.Next(time.Now())
 	}
 
-	return s.scheduleJob(ctx, slug, when, opts.Payload)
+	return s.scheduleJob(ctx, &StoreTask{
+		Slug:    slug,
+		Payload: opts.Payload,
+		When:    when,
+		Trigger: trigger.Expression(task.Trigger),
+	})
 }
 
-func (s *Scheduler) scheduleJob(ctx context.Context, slug string, when time.Time, payload []byte) error {
-	if err := s.store.Create(ctx, &StoreTask{
-		Slug:    slug,
-		Payload: payload,
-		When:    when,
-	}); err != nil && !errors.Is(err, ErrJobAlreadyExists) {
+func (s *Scheduler) scheduleJob(ctx context.Context, st *StoreTask) error {
+	if err := s.store.Create(ctx, st); err != nil && !errors.Is(err, ErrJobAlreadyExists) {
 		return fmt.Errorf("failed to create store task: %w", err)
 	}
 
@@ -297,7 +341,11 @@ func (s *Scheduler) ScheduleOneOffJob(ctx context.Context, slug string, when tim
 
 	defer s.pokeWaiters()
 
-	return s.scheduleJob(ctx, slug, when, payload)
+	return s.scheduleJob(ctx, &StoreTask{
+		Slug:    slug,
+		Payload: payload,
+		When:    when,
+	})
 }
 
 // GetJobSlugs returns the slugs of all of the scheduled jobs.
@@ -406,6 +454,10 @@ func (s *Scheduler) executeAndReschedule(ctx context.Context, st *StoreTask) err
 	}
 
 	go func() {
+		// poke again once the task has been rescheduled (or removed), otherwise the execution loop
+		// would only find the task again on the next heartbeat
+		defer s.pokeWaiters()
+
 		slug := st.Slug
 		st2 := s.executeTask(ctx, *task, st)
 		if st2 == nil || st2.When.IsZero() {
@@ -456,18 +508,40 @@ func (s *Scheduler) executeTask(ctx context.Context, task Task, storeTask *Store
 	}
 
 	storeTask2.Retry = 0
+	if storeTask2.Trigger == "" {
+		// keep the stored trigger expression, the job is not responsible for carrying it
+		storeTask2.Trigger = storeTask.Trigger
+	}
 	// reschedule the Job
-	if task.Trigger == nil {
+	trg := s.resolveTrigger(task, storeTask)
+	if trg == nil {
 		// will cause this to be removed from the job queue
 		return nil
 	}
-	storeTask2.When = task.Trigger.Next(storeTask2.When)
+	storeTask2.When = trg.Next(storeTask2.When)
 	if storeTask2.When.IsZero() {
 		// will cause this to be removed from the job queue
 		return nil
 	}
 
 	return storeTask2
+}
+
+// resolveTrigger returns the trigger to use to reschedule the task.
+// For tasks whose trigger comes from the store, the stored expression (as read when the task was locked)
+// takes precedence over the registered one, so changes in the store are honoured on every run.
+func (s *Scheduler) resolveTrigger(task Task, storeTask *StoreTask) trigger.Trigger {
+	if !task.TriggerFromStore || storeTask.Trigger == "" {
+		return task.Trigger
+	}
+
+	trg, err := trigger.Parse(storeTask.Trigger)
+	if err != nil {
+		s.logger.Warn("Task '%s': invalid stored trigger '%s', using the registered trigger: %+v", storeTask.Slug, storeTask.Trigger, err)
+		return task.Trigger
+	}
+
+	return trg
 }
 
 func (s *Scheduler) startHeartbeat(ctx context.Context, waiter *lib.Waiter) {

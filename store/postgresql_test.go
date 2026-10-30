@@ -107,6 +107,7 @@ func dbSchema(db *sqlx.DB) {
 		version INTEGER NOT NULL,
 		retry INTEGER NOT NULL,
 		result TEXT,
+		trigger_expr TEXT,
 		locked_until TIMESTAMP
 	);
 	CREATE INDEX sch_run_at_lock_idx ON schedules (run_at, locked_until);

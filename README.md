@@ -149,6 +149,30 @@ sched.ScheduleJob(ctx, "print-job", pj, cronTrigger)
 sched.Start(ctx)
 ```
 
+### Loading the Trigger from the Store
+
+When a job is scheduled, its trigger expression is persisted alongside the task (cron expressions as given, simple triggers as `@every <duration>`).
+`LoadScheduleJob` reads that expression back from the store and uses it to schedule the job, so the schedule can be changed directly in the store without a new deployment.
+The provided trigger is only used as a default when the job is not in the store yet (or was stored without a trigger).
+
+The stored expression is re-read every time the job runs, so editing it in the store while the scheduler is running takes effect on the next execution (an invalid expression is logged and the default trigger is used instead).
+Jobs scheduled with `ScheduleJob` always keep the trigger given in code.
+
+```go
+ctx := context.Background()
+store := // ...
+sched := scheduler.NewScheduler(store)
+
+// Used only the first time, when nothing is stored for "print-job" yet.
+// On the next start-up the trigger stored for "print-job" takes precedence.
+defaultTrigger, _ := trigger.NewCronTrigger("@hourly")
+sched.LoadScheduleJob(ctx, "print-job", &PrintJob{}, defaultTrigger)
+
+sched.Start(ctx, 1)
+```
+
+For the PostgreSQL store this requires a `trigger_expr TEXT` column in the schedules table.
+
 ### One-off Jobs
 
 ```go

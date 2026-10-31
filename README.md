@@ -122,7 +122,37 @@ Available storage implementations:
 - `Memory` - In-memory storage (single instance only)
 - `PostgreSQL` - PostgreSQL with advisory locking for distributed coordination
 - `Firestore` - Google Cloud Firestore for distributed coordination
-- `MongoDB` - MongoDB with versioned atomic updates for distributed coordination (no replica set required; call `CreateIndexes` once to create the index used to find the next run)
+- `MongoDB` - MongoDB with versioned atomic updates for distributed coordination (no replica set required)
+
+Every store has a `CreateSchema(ctx)` method that creates whatever the store needs (table, collection, indexes). It is idempotent, so it can be called on every start-up:
+
+```go
+store := postgres.New(db) // or mongodb.New(...), firestore.New(...), memory.New()
+if err := store.CreateSchema(ctx); err != nil {
+    // ...
+}
+```
+
+- `PostgreSQL` creates the `schedules` table (or the one given with `TableOption`) and an index on `(run_at, locked_until)`.
+- `MongoDB` creates the `schedules` collection (or the one given with `CollectionOption`) and an index on `(run_at, locked_until)`.
+- `Firestore` and `Memory` need no setup, so it is a no-op.
+
+If you prefer to manage the PostgreSQL schema yourself (e.g. with a migration tool), this is the table that the store expects:
+
+```sql
+CREATE TABLE IF NOT EXISTS schedules (
+    slug TEXT PRIMARY KEY,
+    payload BYTEA,
+    run_at TIMESTAMP NOT NULL,
+    version INTEGER NOT NULL,
+    retry INTEGER NOT NULL,
+    result TEXT,
+    trigger_expr TEXT,
+    suspended BOOLEAN NOT NULL DEFAULT FALSE,
+    locked_until TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS schedules_run_at_lock_idx ON schedules (run_at, locked_until);
+```
 
 ## Examples
 

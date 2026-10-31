@@ -92,6 +92,39 @@ func New(db *sql.DB, options ...StoreOption) *Store {
 	return ps
 }
 
+// CreateSchema creates the table and the index used by the store, if they do not exist yet.
+// It is safe to call it multiple times.
+//
+// The table has the following columns:
+//
+//	slug         TEXT PRIMARY KEY
+//	payload      BYTEA
+//	run_at       TIMESTAMP NOT NULL
+//	version      INTEGER NOT NULL
+//	retry        INTEGER NOT NULL
+//	result       TEXT
+//	trigger_expr TEXT
+//	suspended    BOOLEAN NOT NULL DEFAULT FALSE
+//	locked_until TIMESTAMP
+func (s *Store) CreateSchema(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %[1]s (
+		slug TEXT PRIMARY KEY,
+		payload BYTEA,
+		run_at TIMESTAMP NOT NULL,
+		version INTEGER NOT NULL,
+		retry INTEGER NOT NULL,
+		result TEXT,
+		trigger_expr TEXT,
+		suspended BOOLEAN NOT NULL DEFAULT FALSE,
+		locked_until TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS %[1]s_run_at_lock_idx ON %[1]s (run_at, locked_until);`, s.tableName))
+	if err != nil {
+		return fmt.Errorf("failed to create schema for table '%s': %w", s.tableName, err)
+	}
+	return nil
+}
+
 func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toEntry(task)
 	_, err := s.db.NamedExecContext(

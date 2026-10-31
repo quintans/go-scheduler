@@ -108,10 +108,15 @@ func (s *Store) collection() *mongo.Collection {
 	return s.db.Collection(s.collectionName)
 }
 
-// CreateIndexes creates the index used by NextRun to find the next task to run.
+// CreateSchema creates the collection and the index used by NextRun to find the next task to run.
 // It is safe to call it multiple times.
-func (s *Store) CreateIndexes(ctx context.Context) error {
-	_, err := s.collection().Indexes().CreateOne(ctx, mongo.IndexModel{
+func (s *Store) CreateSchema(ctx context.Context) error {
+	err := s.db.CreateCollection(ctx, s.collectionName)
+	if err != nil && !isNamespaceExists(err) {
+		return fmt.Errorf("failed to create collection '%s': %w", s.collectionName, err)
+	}
+
+	_, err = s.collection().Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "run_at", Value: 1},
 			{Key: "locked_until", Value: 1},
@@ -289,6 +294,13 @@ func (s *Store) Clear(ctx context.Context) error {
 		return fmt.Errorf("failed to clear: %w", err)
 	}
 	return nil
+}
+
+// isNamespaceExists reports whether the error is MongoDB's "NamespaceExists" (code 48),
+// returned by CreateCollection when the collection already exists.
+func isNamespaceExists(err error) bool {
+	var cmdErr mongo.CommandError
+	return errors.As(err, &cmdErr) && cmdErr.Code == 48
 }
 
 // notSuspended matches the tasks that are not suspended. A missing "suspended" field is also matched.

@@ -110,6 +110,14 @@ func (s *Store) docRef(slug string) *gfs.DocumentRef {
 	return s.collectionRef().Doc(slug)
 }
 
+// CreateSchema makes sure that the store is ready to be used.
+// Firestore creates collections implicitly on the first write and automatically indexes
+// the single field ("run_at") used to order the queries, so there is nothing to create.
+// It is provided so that every store offers the same setup entry point.
+func (s *Store) CreateSchema(context.Context) error {
+	return nil
+}
+
 func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toEntry(task)
 	_, err := s.docRef(task.Slug).Create(ctx, entry)

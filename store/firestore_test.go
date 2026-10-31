@@ -26,6 +26,7 @@ func TestFireStore(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	store := firestore.New(db)
+	require.NoError(t, store.CreateSchema(t.Context()))
 	t.Run("firestore", func(t *testing.T) {
 		testScheduler(t, store)
 	})

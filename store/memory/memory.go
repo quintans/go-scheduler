@@ -25,6 +25,13 @@ func New() *MemStore {
 	}
 }
 
+// CreateSchema makes sure that the store is ready to be used.
+// The memory store needs no setup, so this does nothing.
+// It is provided so that every store offers the same setup entry point.
+func (s *MemStore) CreateSchema(context.Context) error {
+	return nil
+}
+
 func (s *MemStore) Create(_ context.Context, task *scheduler.StoreTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

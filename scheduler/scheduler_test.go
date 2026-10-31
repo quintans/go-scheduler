@@ -59,18 +59,19 @@ func TestScheduler(t *testing.T) {
 		// by specifying it here
 		// the same applies to backoff, if we wanted to override the registered backoff
 		now := time.Now()
-		err = sched.ScheduleOneOffJob(ctx, "ad-hoc:1", now.Add(time.Second*5), []byte("Ad hoc Job"))
+		adHocSlug, err := sched.ScheduleOneOffJob(ctx, "ad-hoc", now.Add(time.Second*5), []byte("Ad hoc Job"))
 		require.NoError(t, err)
-		err = sched.ScheduleOneOffJob(ctx, "first:1", now.Add(time.Second*12), []byte("First job"))
+		assert.True(t, strings.HasPrefix(adHocSlug, "ad-hoc:"))
+		firstSlug, err := sched.ScheduleOneOffJob(ctx, "first", now.Add(time.Second*12), []byte("First job"))
 		require.NoError(t, err)
-		err = sched.ScheduleOneOffJob(ctx, "second:1", now.Add(time.Second*6), []byte("Second job"))
+		secondSlug, err := sched.ScheduleOneOffJob(ctx, "second", now.Add(time.Second*6), []byte("Second job"))
 		require.NoError(t, err)
-		err = sched.ScheduleOneOffJob(ctx, "third:1", now.Add(time.Second*3), []byte("Third job"))
+		thirdSlug, err := sched.ScheduleOneOffJob(ctx, "third", now.Add(time.Second*3), []byte("Third job"))
 		require.NoError(t, err)
 
 		slugs, err := sched.GetJobSlugs(ctx)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"ad-hoc:1", "first:1", "second:1", "third:1", "print-cron"}, slugs)
+		assert.ElementsMatch(t, []string{adHocSlug, firstSlug, secondSlug, thirdSlug, "print-cron"}, slugs)
 
 		// the cron job runs at 1s, 4s, 7s, 10s...; observe between runs to avoid racing with an execution
 		time.Sleep(time.Millisecond * 9500)
@@ -80,7 +81,7 @@ func TestScheduler(t *testing.T) {
 
 		slugs, err = sched.GetJobSlugs(ctx)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"first:1", "print-cron"}, slugs)
+		assert.ElementsMatch(t, []string{firstSlug, "print-cron"}, slugs)
 
 		st, err := store.Get(ctx, "print-cron")
 		require.NoError(t, err)
@@ -91,7 +92,7 @@ func TestScheduler(t *testing.T) {
 
 		slugs, err = sched.GetJobSlugs(ctx)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"first:1"}, slugs)
+		assert.ElementsMatch(t, []string{firstSlug}, slugs)
 	})
 }
 
@@ -389,27 +390,27 @@ func TestSuspendResumeJob(t *testing.T) {
 			sched.Start(ctx, 1)
 
 			due := time.Now().Add(time.Second)
-			err := sched.ScheduleOneOffJob(ctx, "ad-hoc:1", due, []byte("Ad hoc"))
+			slug, err := sched.ScheduleOneOffJob(ctx, "ad-hoc", due, []byte("Ad hoc"))
 			require.NoError(t, err)
 			synctest.Wait()
 
-			require.NoError(t, sched.SuspendJob(ctx, "ad-hoc:1"))
+			require.NoError(t, sched.SuspendJob(ctx, slug))
 			time.Sleep(3 * time.Second)
 
-			st, err := store.Get(ctx, "ad-hoc:1")
+			st, err := store.Get(ctx, slug)
 			require.NoError(t, err)
 			assert.True(t, st.Suspended)
 			assert.Equal(t, "Ad hoc", string(st.Payload))
 
-			require.NoError(t, sched.ResumeJob(ctx, "ad-hoc:1"))
-			st, err = store.Get(ctx, "ad-hoc:1")
+			require.NoError(t, sched.ResumeJob(ctx, slug))
+			st, err = store.Get(ctx, slug)
 			require.NoError(t, err)
 			assert.False(t, st.Suspended)
 			assert.Equal(t, due, st.When)
 
 			// it runs immediately, and being a one-off job without trigger it is then removed
 			synctest.Wait()
-			_, err = store.Get(ctx, "ad-hoc:1")
+			_, err = store.Get(ctx, slug)
 			require.ErrorIs(t, err, scheduler.ErrJobNotFound)
 		})
 	})

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/quintans/go-scheduler/trigger"
 )
 
@@ -17,7 +18,7 @@ var (
 	ErrJobNotLocked         = errors.New("job lock was not acquired")
 	ErrJobAlreadyRegistered = errors.New("job already registered")
 	ErrJobAlreadyExists     = errors.New("job already exists")
-	ErrInvalidOneOffJobSlug = errors.New("invalid one-off job slug format")
+	ErrInvalidOneOffJobSlug = errors.New("invalid one-off job slug: must not contain ':'")
 )
 
 const (
@@ -258,6 +259,9 @@ func (s *Scheduler) RegisterOneOffJob(slug string, job Job, options ...RegisterJ
 	if s.running {
 		return fmt.Errorf("cannot register one-off job after scheduler has started: '%s'", slug)
 	}
+	if strings.Contains(slug, oneOffSlugSeparator) {
+		return fmt.Errorf("failed to register one-off job '%s': %w", slug, ErrInvalidOneOffJobSlug)
+	}
 
 	opts := RegisterJobOptions{
 		Backoff: trigger.NewExponentialBackoff(),
@@ -312,34 +316,39 @@ type ScheduleOneOffJobOptions struct {
 	Payload []byte
 }
 
-// ScheduleOneOffJob schedules short lived jobs
+// ScheduleOneOffJob schedules a single run of a job previously registered with RegisterOneOffJob.
 //
-// slug will have the form <job-name>:<anything> to ensure uniqueness.
-// Typically <anything> can be a UUID or a timestamp.
-func (s *Scheduler) ScheduleOneOffJob(ctx context.Context, slug string, when time.Time, payload []byte) error {
+// slug is the slug used in RegisterOneOffJob. Each call creates a new scheduled task with
+// a unique slug of the form <slug>:<uuid>, which is returned so that it can be used with
+// SuspendJob, ResumeJob, DeleteJob or GetScheduledJob.
+func (s *Scheduler) ScheduleOneOffJob(ctx context.Context, slug string, when time.Time, payload []byte) (string, error) {
 	if !s.running {
-		return fmt.Errorf("cannot schedule one-off job before scheduler has started job: '%s'", slug)
+		return "", fmt.Errorf("cannot schedule one-off job before scheduler has started job: '%s'", slug)
 	}
 
-	parts := strings.Split(slug, oneOffSlugSeparator)
-	if len(parts) != 2 {
-		return ErrInvalidOneOffJobSlug
+	if strings.Contains(slug, oneOffSlugSeparator) {
+		return "", fmt.Errorf("cannot schedule one-off job '%s': %w", slug, ErrInvalidOneOffJobSlug)
 	}
-	task := s.registry.get(parts[0])
+	task := s.registry.get(slug)
 	if task == nil {
-		return fmt.Errorf("job not found: %s", parts[0])
+		return "", fmt.Errorf("job not found: %s", slug)
 	}
 	if !task.OneOff {
-		return fmt.Errorf("job is not a one-off job: %s", parts[0])
+		return "", fmt.Errorf("job is not a one-off job: %s", slug)
 	}
 
 	defer s.pokeWaiters()
 
-	return s.scheduleJob(ctx, &StoreTask{
-		Slug:    slug,
+	fullSlug := slug + oneOffSlugSeparator + uuid.NewString()
+	if err := s.scheduleJob(ctx, &StoreTask{
+		Slug:    fullSlug,
 		Payload: payload,
 		When:    when,
-	})
+	}); err != nil {
+		return "", err
+	}
+
+	return fullSlug, nil
 }
 
 // GetJobSlugs returns the slugs of all of the scheduled jobs.
@@ -425,13 +434,10 @@ func (s *Scheduler) triggerFor(st *StoreTask) trigger.Trigger {
 	return trg
 }
 
-// baseSlug returns the registry slug of a stored task: one-off tasks are stored as <job-name>:<anything>.
+// baseSlug returns the registry slug of a stored task: one-off tasks are stored as <job-name>:<uuid>.
 func baseSlug(slug string) string {
-	parts := strings.Split(slug, oneOffSlugSeparator)
-	if len(parts) == 2 {
-		return parts[0]
-	}
-	return slug
+	base, _, _ := strings.Cut(slug, oneOffSlugSeparator)
+	return base
 }
 
 // DeleteJob remove the job from the execution queue

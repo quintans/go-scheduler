@@ -43,15 +43,15 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 
 	// dynamic jobs, receive execution parameters though the payload argument
 	now := time.Now()
-	err = sched.ScheduleOneOffJob(ctx, "good-job-oo:1", now.Add(time.Millisecond*700), []byte("OK"))
+	_, err = sched.ScheduleOneOffJob(ctx, "good-job-oo", now.Add(time.Millisecond*700), []byte("OK"))
 	require.NoError(t, err)
-	err = sched.ScheduleOneOffJob(ctx, "bad-job-oo:1", now.Add(time.Millisecond), []byte("BAD"))
+	badJobOOSlug, err := sched.ScheduleOneOffJob(ctx, "bad-job-oo", now.Add(time.Millisecond), []byte("BAD"))
 	require.NoError(t, err)
 
 	time.Sleep(4 * time.Second)
 	scheduledJobKeys, err := sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"bad-job", "good-job", "bad-job-oo:1"}, scheduledJobKeys)
+	require.ElementsMatch(t, []string{"bad-job", "good-job", badJobOOSlug}, scheduledJobKeys)
 
 	_, err = sched.GetScheduledJob(ctx, "good-job")
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 
 	scheduledJobKeys, err = sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"bad-job", "bad-job-oo:1"}, scheduledJobKeys)
+	require.ElementsMatch(t, []string{"bad-job", badJobOOSlug}, scheduledJobKeys)
 
 	cancel()
 	ctx = context.Background()
@@ -77,7 +77,7 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
 
-	st, err = store.Get(ctx, "bad-job-oo:1")
+	st, err = store.Get(ctx, badJobOOSlug)
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
 }

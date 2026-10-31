@@ -215,11 +215,12 @@ sched.RegisterOneOffJob("print-job", pj)
 
 sched.Start(ctx, 1)
 
-// Schedule a one-off job with a payload
-// If already scheduled by another process, it will be ignored
-sched.ScheduleOneOffJob(
+// Schedule a one-off job with a payload.
+// Each call creates a new task with a unique slug of the form "print-job:<uuid>",
+// which is returned so that it can be suspended, resumed or deleted later.
+slug, err := sched.ScheduleOneOffJob(
     ctx, 
-    "print-job:"+uuid.NewString(), 
+    "print-job", 
     time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
     []byte("9bfadfd6-8e62-4c58-9b6e-636d666b6643"),
 )

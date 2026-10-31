@@ -183,7 +183,7 @@ func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error
 		return e, nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to unlock lock '%s': %w", task.Slug, err)
+		return fmt.Errorf("failed to reschedule %s: %w", task.Slug, err)
 	}
 	return nil
 }

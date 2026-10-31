@@ -177,11 +177,11 @@ func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error
 		WHERE slug = :slug AND version = :version`, s.tableName),
 		entry)
 	if err != nil {
-		return fmt.Errorf("failed to unlock lock: %w", err)
+		return fmt.Errorf("failed to reschedule %s: %w", task.Slug, err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("failed to unlock lock %+v: no update: %w", entry, scheduler.ErrJobNotFound)
+		return fmt.Errorf("failed to reschedule %s: no update: %w", task.Slug, scheduler.ErrJobNotFound)
 	}
 
 	return nil

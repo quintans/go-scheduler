@@ -18,27 +18,32 @@ const (
 	pgUniqueViolation = "23505"
 )
 
-const defaultLockDuration = 5 * time.Minute
+const (
+	defaultLockDuration = 5 * time.Minute
+	selectColumns       = "slug, payload, run_at, version, retry, result, trigger_expr, suspended"
+)
 
 type Entry struct {
-	Slug    string    `db:"slug"`
-	Payload []byte    `db:"payload"`
-	When    time.Time `db:"run_at"`
-	Version int64     `db:"version"`
-	Retry   int       `db:"retry"`
-	Result  string    `db:"result"`
-	Trigger string    `db:"trigger_expr"`
+	Slug      string    `db:"slug"`
+	Payload   []byte    `db:"payload"`
+	When      time.Time `db:"run_at"`
+	Version   int64     `db:"version"`
+	Retry     int       `db:"retry"`
+	Result    string    `db:"result"`
+	Trigger   string    `db:"trigger_expr"`
+	Suspended bool      `db:"suspended"`
 }
 
 func toEntry(t *scheduler.StoreTask) *Entry {
 	return &Entry{
-		Slug:    t.Slug,
-		Payload: t.Payload,
-		When:    t.When.UTC(),
-		Version: t.Version,
-		Retry:   t.Retry,
-		Result:  t.Result,
-		Trigger: t.Trigger,
+		Slug:      t.Slug,
+		Payload:   t.Payload,
+		When:      t.When.UTC(),
+		Version:   t.Version,
+		Retry:     t.Retry,
+		Result:    t.Result,
+		Trigger:   t.Trigger,
+		Suspended: t.Suspended,
 	}
 }
 
@@ -47,13 +52,14 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 		return nil
 	}
 	return &scheduler.StoreTask{
-		Slug:    e.Slug,
-		Payload: e.Payload,
-		When:    e.When.UTC(),
-		Version: e.Version,
-		Retry:   e.Retry,
-		Result:  e.Result,
-		Trigger: e.Trigger,
+		Slug:      e.Slug,
+		Payload:   e.Payload,
+		When:      e.When.UTC(),
+		Version:   e.Version,
+		Retry:     e.Retry,
+		Result:    e.Result,
+		Trigger:   e.Trigger,
+		Suspended: e.Suspended,
 	}
 }
 
@@ -90,8 +96,8 @@ func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	entry := toEntry(task)
 	_, err := s.db.NamedExecContext(
 		ctx,
-		fmt.Sprintf(`INSERT INTO %s (slug, payload, run_at, version, retry, result, trigger_expr, locked_until)
-		VALUES (:slug, :payload, :run_at, :version, :retry, :result, :trigger_expr, NULL)`, s.tableName),
+		fmt.Sprintf(`INSERT INTO %s (slug, payload, run_at, version, retry, result, trigger_expr, suspended, locked_until)
+		VALUES (:slug, :payload, :run_at, :version, :retry, :result, :trigger_expr, :suspended, NULL)`, s.tableName),
 		entry,
 	)
 	if err == nil {
@@ -109,11 +115,11 @@ func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	now := time.Now().UTC()
 	entry := &Entry{}
-	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT slug, payload, run_at, version, retry, result, trigger_expr FROM %s
-	WHERE locked_until IS NULL OR locked_until < $1
+	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT %s FROM %s
+	WHERE (locked_until IS NULL OR locked_until < $1) AND NOT suspended
 	ORDER BY run_at
 	ASC LIMIT 1`,
-		s.tableName), now)
+		selectColumns, s.tableName), now)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, scheduler.ErrJobNotFound
@@ -144,7 +150,7 @@ func (s *Store) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask)
 	lockUntil := now.Add(s.lockDuration)
 	res, err := t.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s SET locked_until = $1, version = version + 1
-		WHERE slug = $2 AND version = $3`, s.tableName),
+		WHERE slug = $2 AND version = $3 AND NOT suspended`, s.tableName),
 		lockUntil, task.Slug, task.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lock: %w", err)
@@ -181,6 +187,30 @@ func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error
 	return nil
 }
 
+func (s *Store) Suspend(ctx context.Context, slug string) error {
+	return s.updateSuspended(ctx, fmt.Sprintf("UPDATE %s SET suspended = TRUE WHERE slug = $1", s.tableName), "suspend", slug)
+}
+
+func (s *Store) Resume(ctx context.Context, slug string, when time.Time) error {
+	return s.updateSuspended(ctx, fmt.Sprintf("UPDATE %s SET suspended = FALSE, run_at = $2 WHERE slug = $1", s.tableName), "resume", slug, when.UTC())
+}
+
+func (s *Store) updateSuspended(ctx context.Context, query string, action string, slug string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, query, append([]any{slug}, args...)...)
+	if err != nil {
+		return fmt.Errorf("failed to %s '%s': %w", action, slug, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows when trying to %s '%s': %w", action, slug, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%s task '%s': %w", action, slug, scheduler.ErrJobNotFound)
+	}
+
+	return nil
+}
+
 func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 	slugs := []string{}
 	err := s.db.SelectContext(ctx, &slugs, fmt.Sprintf("SELECT slug FROM %s", s.tableName))
@@ -197,7 +227,7 @@ func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 
 func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
 	entry := &Entry{}
-	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT slug, payload, run_at, version, retry, result, trigger_expr FROM %s WHERE slug = $1", s.tableName), slug)
+	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT %s FROM %s WHERE slug = $1", selectColumns, s.tableName), slug)
 	if err == nil {
 		return fromEntry(entry), nil
 	}

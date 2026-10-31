@@ -28,18 +28,20 @@ type Entry struct {
 	Retry       int        `bson:"retry"`
 	Result      string     `bson:"result,omitempty"`
 	Trigger     string     `bson:"trigger_expr,omitempty"`
+	Suspended   bool       `bson:"suspended"`
 	LockedUntil *time.Time `bson:"locked_until"`
 }
 
 func toEntry(t *scheduler.StoreTask) *Entry {
 	return &Entry{
-		Slug:    t.Slug,
-		Payload: t.Payload,
-		When:    t.When.UTC(),
-		Version: t.Version,
-		Retry:   t.Retry,
-		Result:  t.Result,
-		Trigger: t.Trigger,
+		Slug:      t.Slug,
+		Payload:   t.Payload,
+		When:      t.When.UTC(),
+		Version:   t.Version,
+		Retry:     t.Retry,
+		Result:    t.Result,
+		Trigger:   t.Trigger,
+		Suspended: t.Suspended,
 	}
 }
 
@@ -48,13 +50,14 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 		return nil
 	}
 	return &scheduler.StoreTask{
-		Slug:    e.Slug,
-		Payload: e.Payload,
-		When:    e.When.UTC(),
-		Version: e.Version,
-		Retry:   e.Retry,
-		Result:  e.Result,
-		Trigger: e.Trigger,
+		Slug:      e.Slug,
+		Payload:   e.Payload,
+		When:      e.When.UTC(),
+		Version:   e.Version,
+		Retry:     e.Retry,
+		Result:    e.Result,
+		Trigger:   e.Trigger,
+		Suspended: e.Suspended,
 	}
 }
 
@@ -141,7 +144,7 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	entry := &Entry{}
 	err := s.collection().FindOne(
 		ctx,
-		unlockedFilter(now),
+		runnableFilter(now),
 		options.FindOne().SetSort(bson.D{{Key: "run_at", Value: 1}}),
 	).Decode(entry)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -159,7 +162,7 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 	entry := &Entry{}
 	err := s.collection().FindOneAndUpdate(
 		ctx,
-		bson.D{{Key: "_id", Value: task.Slug}, {Key: "version", Value: task.Version}},
+		bson.D{{Key: "_id", Value: task.Slug}, {Key: "version", Value: task.Version}, notSuspended},
 		bson.D{
 			{Key: "$set", Value: bson.D{{Key: "locked_until", Value: lockUntil}}},
 			{Key: "$inc", Value: bson.D{{Key: "version", Value: 1}}},
@@ -198,6 +201,30 @@ func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error
 	}
 	if res.MatchedCount == 0 {
 		return fmt.Errorf("failed to unlock lock %+v: no update: %w", entry, scheduler.ErrJobNotFound)
+	}
+
+	return nil
+}
+
+func (s *Store) Suspend(ctx context.Context, slug string) error {
+	return s.updateSuspended(ctx, "suspend", slug, bson.D{{Key: "suspended", Value: true}})
+}
+
+func (s *Store) Resume(ctx context.Context, slug string, when time.Time) error {
+	return s.updateSuspended(ctx, "resume", slug, bson.D{{Key: "suspended", Value: false}, {Key: "run_at", Value: when.UTC()}})
+}
+
+func (s *Store) updateSuspended(ctx context.Context, action string, slug string, set bson.D) error {
+	res, err := s.collection().UpdateOne(
+		ctx,
+		bson.D{{Key: "_id", Value: slug}},
+		bson.D{{Key: "$set", Value: set}},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to %s '%s': %w", action, slug, err)
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("%s task '%s': %w", action, slug, scheduler.ErrJobNotFound)
 	}
 
 	return nil
@@ -264,11 +291,17 @@ func (s *Store) Clear(ctx context.Context) error {
 	return nil
 }
 
-// unlockedFilter matches the tasks that are not locked, or whose lock has expired.
+// notSuspended matches the tasks that are not suspended. A missing "suspended" field is also matched.
+var notSuspended = bson.E{Key: "suspended", Value: bson.D{{Key: "$ne", Value: true}}}
+
+// runnableFilter matches the tasks that are not suspended and are not locked, or whose lock has expired.
 // A missing "locked_until" field is also matched by the "null" comparison.
-func unlockedFilter(now time.Time) bson.D {
-	return bson.D{{Key: "$or", Value: bson.A{
-		bson.D{{Key: "locked_until", Value: nil}},
-		bson.D{{Key: "locked_until", Value: bson.D{{Key: "$lt", Value: now}}}},
-	}}}
+func runnableFilter(now time.Time) bson.D {
+	return bson.D{
+		notSuspended,
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "locked_until", Value: nil}},
+			bson.D{{Key: "locked_until", Value: bson.D{{Key: "$lt", Value: now}}}},
+		}},
+	}
 }

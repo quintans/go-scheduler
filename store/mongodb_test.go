@@ -32,6 +32,9 @@ func TestMongoStore(t *testing.T) {
 	t.Run("mongodb", func(t *testing.T) {
 		testScheduler(t, store)
 	})
+	t.Run("mongodb suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
 }
 
 func mongoSetup() (string, func(), error) {

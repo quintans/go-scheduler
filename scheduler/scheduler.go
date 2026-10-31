@@ -68,6 +68,7 @@ type Task struct {
 type ScheduledJob struct {
 	Job         Job
 	NextRunTime time.Time
+	Suspended   bool
 }
 
 // A Scheduler is the Jobs orchestrator.
@@ -353,11 +354,84 @@ func (s *Scheduler) GetScheduledJob(ctx context.Context, slug string) (*Schedule
 		return nil, err
 	}
 
-	task := s.registry.get(storedTask.Slug)
-	return &ScheduledJob{
-		Job:         task.Job,
+	sj := &ScheduledJob{
 		NextRunTime: storedTask.When,
-	}, nil
+		Suspended:   storedTask.Suspended,
+	}
+	if task := s.registry.get(baseSlug(storedTask.Slug)); task != nil {
+		sj.Job = task.Job
+	}
+	return sj, nil
+}
+
+// SuspendJob suspends the job, so that it will not run until it is resumed with ResumeJob.
+// A run already in progress is not interrupted, but no further runs will happen.
+// The suspension is persisted in the store, so it survives restarts and is seen by all the scheduler instances.
+func (s *Scheduler) SuspendJob(ctx context.Context, slug string) error {
+	if err := s.store.Suspend(ctx, slug); err != nil {
+		return err
+	}
+	s.pokeWaiters()
+
+	return nil
+}
+
+// ResumeJob resumes a suspended job. It does nothing if the job is not suspended.
+// If the next run time of the job is already in the past, it is recomputed from the job trigger,
+// so that the runs missed while suspended are not executed. A job without a trigger (one-off) keeps its
+// run time and therefore runs right away.
+func (s *Scheduler) ResumeJob(ctx context.Context, slug string) error {
+	st, err := s.store.Get(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if !st.Suspended {
+		return nil
+	}
+
+	when := st.When
+	if now := time.Now(); when.Before(now) {
+		if trg := s.triggerFor(st); trg != nil {
+			if next := trg.Next(now); !next.IsZero() {
+				when = next
+			}
+		}
+	}
+
+	if err := s.store.Resume(ctx, slug, when); err != nil {
+		return err
+	}
+	s.pokeWaiters()
+
+	return nil
+}
+
+// triggerFor returns the trigger of the stored task, or nil if it has none.
+// It honours the same precedence as the execution: the stored expression for tasks loaded from the store,
+// otherwise the registered trigger. If the task is not registered in this instance, the stored expression is used.
+func (s *Scheduler) triggerFor(st *StoreTask) trigger.Trigger {
+	task := s.registry.get(baseSlug(st.Slug))
+	if task != nil {
+		return s.resolveTrigger(*task, st)
+	}
+	if st.Trigger == "" {
+		return nil
+	}
+	trg, err := trigger.Parse(st.Trigger)
+	if err != nil {
+		s.logger.Warn("Task '%s': invalid stored trigger '%s': %+v", st.Slug, st.Trigger, err)
+		return nil
+	}
+	return trg
+}
+
+// baseSlug returns the registry slug of a stored task: one-off tasks are stored as <job-name>:<anything>.
+func baseSlug(slug string) string {
+	parts := strings.Split(slug, oneOffSlugSeparator)
+	if len(parts) == 2 {
+		return parts[0]
+	}
+	return slug
 }
 
 // DeleteJob remove the job from the execution queue
@@ -382,8 +456,16 @@ func (s *Scheduler) startExecutionLoop(ctx context.Context, wake <-chan struct{}
 	for {
 		task, park, err := s.calculateNextRun(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				// the scheduler is shutting down, the store error is a consequence of that
+				return
+			}
 			s.logger.Error("failed to calculate next run: %v", err)
-			time.Sleep(waitOnCalculateNextRunError)
+			select {
+			case <-time.After(waitOnCalculateNextRunError):
+			case <-ctx.Done():
+				return
+			}
 			continue
 		}
 
@@ -456,16 +538,11 @@ func (s *Scheduler) executeAndReschedule(ctx context.Context, st *StoreTask) err
 		return err
 	}
 
-	slug := st.Slug
-	parts := strings.Split(slug, oneOffSlugSeparator)
-	if len(parts) == 2 {
-		// one-off job, use the base slug to find the task
-		slug = parts[0]
-	}
+	slug := baseSlug(st.Slug)
 	task := s.registry.get(slug)
 	if task == nil {
-		s.logger.Info("Task '%s': not found in registry. Removing from store", slug)
-		return s.store.Delete(ctx, slug)
+		s.logger.Info("Task '%s': not found in registry. Removing from store", st.Slug)
+		return s.store.Delete(ctx, st.Slug)
 	}
 
 	go func() {

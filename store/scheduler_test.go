@@ -82,6 +82,83 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	require.False(t, st.IsOK())
 }
 
+// testStoreSuspend exercises the Suspend/Resume operations of the store directly.
+func testStoreSuspend(t *testing.T, store scheduler.JobStore) {
+	ctx := t.Context()
+	require.NoError(t, store.Clear(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	err := store.Create(ctx, &scheduler.StoreTask{Slug: "paused", When: now.Add(-time.Second), Trigger: "@every 1s"})
+	require.NoError(t, err)
+	err = store.Create(ctx, &scheduler.StoreTask{Slug: "later", When: now.Add(time.Hour)})
+	require.NoError(t, err)
+
+	// the earliest task is the next to run
+	next, err := store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "paused", next.Slug)
+
+	require.NoError(t, store.Suspend(ctx, "paused"))
+	require.NoError(t, store.Suspend(ctx, "paused"), "suspending twice is fine")
+
+	st, err := store.Get(ctx, "paused")
+	require.NoError(t, err)
+	require.True(t, st.Suspended)
+	require.Equal(t, "@every 1s", st.Trigger)
+
+	// a suspended task is skipped, even if it is due
+	next, err = store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "later", next.Slug)
+	require.False(t, next.Suspended)
+
+	// and cannot be locked
+	_, err = store.Lock(ctx, st)
+	require.ErrorIs(t, err, scheduler.ErrJobNotLocked)
+
+	// when it is the only task, there is nothing to run
+	require.NoError(t, store.Delete(ctx, "later"))
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+
+	when := now.Add(time.Minute)
+	require.NoError(t, store.Resume(ctx, "paused", when))
+
+	next, err = store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "paused", next.Slug)
+	require.Equal(t, when, next.When)
+
+	st, err = store.Get(ctx, "paused")
+	require.NoError(t, err)
+	require.False(t, st.Suspended)
+	require.Equal(t, when, st.When)
+	require.Equal(t, "@every 1s", st.Trigger)
+
+	// a locked (running) task can be suspended; the lock is kept
+	locked, err := store.Lock(ctx, next)
+	require.NoError(t, err)
+	require.NoError(t, store.Suspend(ctx, "paused"))
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+	// once rescheduled at the end of the run, the task keeps the run result but stays suspended
+	locked.Payload = []byte("ran")
+	locked.When = when.Add(time.Minute)
+	require.NoError(t, store.Reschedule(ctx, locked))
+	st, err = store.Get(ctx, "paused")
+	require.NoError(t, err)
+	require.True(t, st.Suspended)
+	require.Equal(t, "ran", string(st.Payload))
+	require.Equal(t, when.Add(time.Minute), st.When)
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+
+	require.ErrorIs(t, store.Suspend(ctx, "unknown"), scheduler.ErrJobNotFound)
+	require.ErrorIs(t, store.Resume(ctx, "unknown", when), scheduler.ErrJobNotFound)
+
+	require.NoError(t, store.Clear(ctx))
+}
+
 // DummyJob implements the scheduler.Job interface.
 type DummyJob struct {
 	kind string

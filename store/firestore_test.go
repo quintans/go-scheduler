@@ -29,6 +29,9 @@ func TestFireStore(t *testing.T) {
 	t.Run("firestore", func(t *testing.T) {
 		testScheduler(t, store)
 	})
+	t.Run("firestore suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
 }
 
 type FireConfig struct {

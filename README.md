@@ -98,6 +98,12 @@ type JobStore interface {
 	// Reschedule releases the lock and updates task data for the next run.
 	Reschedule(context.Context, *StoreTask) error
 	
+	// Suspend marks the task as suspended: it is skipped by NextRun and cannot be locked until resumed.
+	Suspend(ctx context.Context, slug string) error
+	
+	// Resume clears the suspension and sets the next run time of the task.
+	Resume(ctx context.Context, slug string, when time.Time) error
+	
 	// GetSlugs returns all job identifiers.
 	GetSlugs(context.Context) ([]string, error)
 	
@@ -173,6 +179,28 @@ sched.Start(ctx, 1)
 ```
 
 For the PostgreSQL store this requires a `trigger_expr TEXT` column in the schedules table. The MongoDB store persists it in the `trigger_expr` field.
+
+### Suspending Jobs
+
+A suspended job stays in the store but does not run until it is resumed. The suspension is persisted alongside the task, so it survives restarts and is honoured by every scheduler instance sharing the store.
+
+```go
+// no further runs of "print-job" until it is resumed; a run already in progress is not interrupted
+sched.SuspendJob(ctx, "print-job")
+
+sj, _ := sched.GetScheduledJob(ctx, "print-job")
+fmt.Println(sj.Suspended) // true
+
+sched.ResumeJob(ctx, "print-job")
+```
+
+On resume, if the next run time of the job is already in the past, it is recomputed from the job trigger so the runs missed while suspended are not executed; a one-off job (which has no trigger) keeps its run time and runs right away.
+
+The scheduler never caches the suspension state, it is read from the store on every run. So a job suspended or resumed by another replica, or directly in the database, is picked up without any coordination:
+- a suspended job is skipped when looking for the next run, and if a worker was already waiting for it the lock fails and the worker moves on;
+- a resumed job is found at the latest on the next heartbeat (see `HeartbeatOption`). When resuming directly in the database, set the next run time (`run_at`) as well, otherwise a stale run time in the past makes the job run immediately.
+
+For the PostgreSQL store this requires a `suspended BOOLEAN NOT NULL DEFAULT FALSE` column in the schedules table. The MongoDB and Firestore stores persist it in the `suspended` field (a missing field means not suspended).
 
 ### One-off Jobs
 

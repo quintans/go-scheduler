@@ -11,4 +11,7 @@ func TestMemStore(t *testing.T) {
 	t.Run("memory", func(t *testing.T) {
 		testScheduler(t, store)
 	})
+	t.Run("memory suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
 }

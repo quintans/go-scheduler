@@ -28,6 +28,9 @@ func TestPgStore(t *testing.T) {
 	t.Run("postgres", func(t *testing.T) {
 		testScheduler(t, store)
 	})
+	t.Run("postgres suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
 }
 
 type PgConfig struct {
@@ -108,6 +111,7 @@ func dbSchema(db *sqlx.DB) {
 		retry INTEGER NOT NULL,
 		result TEXT,
 		trigger_expr TEXT,
+		suspended BOOLEAN NOT NULL DEFAULT FALSE,
 		locked_until TIMESTAMP
 	);
 	CREATE INDEX sch_run_at_lock_idx ON schedules (run_at, locked_until);

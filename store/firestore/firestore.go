@@ -28,6 +28,7 @@ type Entry struct {
 	Retry       int       `firestore:"retry,omitempty"`
 	Result      string    `firestore:"result,omitempty"`
 	Trigger     string    `firestore:"trigger_expr,omitempty"`
+	Suspended   bool      `firestore:"suspended"`
 	LockedUntil time.Time `firestore:"locked_until"`
 }
 
@@ -45,13 +46,14 @@ func (e *Entry) IsUnlocked(t time.Time) bool {
 
 func toEntry(t *scheduler.StoreTask) *Entry {
 	return &Entry{
-		Slug:    t.Slug,
-		Payload: t.Payload,
-		When:    t.When.UTC(),
-		Version: t.Version,
-		Retry:   t.Retry,
-		Result:  t.Result,
-		Trigger: t.Trigger,
+		Slug:      t.Slug,
+		Payload:   t.Payload,
+		When:      t.When.UTC(),
+		Version:   t.Version,
+		Retry:     t.Retry,
+		Result:    t.Result,
+		Trigger:   t.Trigger,
+		Suspended: t.Suspended,
 	}
 }
 
@@ -60,13 +62,14 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 		return nil
 	}
 	return &scheduler.StoreTask{
-		Slug:    e.Slug,
-		Payload: e.Payload,
-		When:    e.When.UTC(),
-		Version: e.Version,
-		Retry:   e.Retry,
-		Result:  e.Result,
-		Trigger: e.Trigger,
+		Slug:      e.Slug,
+		Payload:   e.Payload,
+		When:      e.When.UTC(),
+		Version:   e.Version,
+		Retry:     e.Retry,
+		Result:    e.Result,
+		Trigger:   e.Trigger,
+		Suspended: e.Suspended,
 	}
 }
 
@@ -146,7 +149,7 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert doc to entry on next run: %w", err)
 		}
-		if entry.IsUnlocked(now) {
+		if !entry.Suspended && entry.IsUnlocked(now) {
 			return fromEntry(entry), nil
 		}
 	}
@@ -154,9 +157,13 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 
 func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
 	e, err := s.update(ctx, task.Slug, task.Version, func(old *Entry) (*Entry, error) {
+		if old.Suspended {
+			return nil, scheduler.ErrJobNotLocked
+		}
 		e := toEntry(task)
 		// the trigger expression is owned by the store and may have been edited there
 		e.Trigger = old.Trigger
+		e.Suspended = old.Suspended
 		e.Lock(s.lockDuration)
 		return e, nil
 	})
@@ -169,13 +176,37 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
 	_, err := s.update(ctx, task.Slug, task.Version, func(old *Entry) (*Entry, error) {
 		e := toEntry(task)
-		// the trigger expression is owned by the store and may have been edited there
+		// the trigger expression and the suspension are owned by the store and may have changed while the task was running
 		e.Trigger = old.Trigger
+		e.Suspended = old.Suspended
 		e.Unlock()
 		return e, nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed to unlock lock '%s': %w", task.Slug, err)
+	}
+	return nil
+}
+
+func (s *Store) Suspend(ctx context.Context, slug string) error {
+	_, err := s.modify(ctx, slug, func(e *Entry) (*Entry, error) {
+		e.Suspended = true
+		return e, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to suspend '%s': %w", slug, err)
+	}
+	return nil
+}
+
+func (s *Store) Resume(ctx context.Context, slug string, when time.Time) error {
+	_, err := s.modify(ctx, slug, func(e *Entry) (*Entry, error) {
+		e.Suspended = false
+		e.When = when.UTC()
+		return e, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to resume '%s': %w", slug, err)
 	}
 	return nil
 }
@@ -262,11 +293,31 @@ func (s *Store) Clear(ctx context.Context) error {
 	}
 }
 
+// update modifies the entry in a transaction, failing if its version is not the expected one, and bumps the version.
 func (s *Store) update(ctx context.Context, slug string, version int64, updateFn func(*Entry) (*Entry, error)) (*Entry, error) {
+	return s.modify(ctx, slug, func(old *Entry) (*Entry, error) {
+		if old.Version != version {
+			return nil, errOptimisticLocking
+		}
+		e, err := updateFn(old)
+		if err != nil {
+			return nil, err
+		}
+		e.Version++
+		return e, nil
+	})
+}
+
+// modify modifies the entry in a transaction. The version is left untouched, so a task being run
+// (locked with a given version) can still be rescheduled afterwards.
+func (s *Store) modify(ctx context.Context, slug string, updateFn func(*Entry) (*Entry, error)) (*Entry, error) {
 	ref := s.docRef(slug)
 	oldEntry := &Entry{}
 	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *gfs.Transaction) error {
 		doc, err := tx.Get(ref)
+		if status.Code(err) == codes.NotFound {
+			return scheduler.ErrJobNotFound
+		}
 		if err != nil {
 			return err
 		}
@@ -274,14 +325,10 @@ func (s *Store) update(ctx context.Context, slug string, version int64, updateFn
 		if err != nil {
 			return err
 		}
-		if oldEntry.Version != version {
-			return errOptimisticLocking
-		}
 		oldEntry, err = updateFn(oldEntry)
 		if err != nil {
 			return err
 		}
-		oldEntry.Version++
 		return tx.Set(ref, oldEntry)
 	})
 	if err != nil {

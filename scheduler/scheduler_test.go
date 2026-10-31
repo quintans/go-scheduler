@@ -2,9 +2,11 @@ package scheduler_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -298,4 +300,280 @@ func editStoredTrigger(t *testing.T, store scheduler.JobStore, slug, expr string
 
 	require.NoError(t, store.Delete(ctx, slug))
 	require.NoError(t, store.Create(ctx, &edited))
+}
+
+func TestSuspendResumeJob(t *testing.T) {
+	t.Run("a suspended job does not run and resumes from the next trigger time", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			firstRun := time.Now().Add(time.Second)
+			err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second),
+				scheduler.WithWhen(firstRun), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+			synctest.Wait()
+
+			err = sched.SuspendJob(ctx, "job")
+			require.NoError(t, err)
+
+			sj, err := sched.GetScheduledJob(ctx, "job")
+			require.NoError(t, err)
+			assert.True(t, sj.Suspended)
+
+			// well past several trigger times
+			time.Sleep(5 * time.Second)
+
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.True(t, st.Suspended)
+			assert.Equal(t, "Job", string(st.Payload), "a suspended job must not run")
+			assert.Equal(t, firstRun, st.When)
+
+			err = sched.ResumeJob(ctx, "job")
+			require.NoError(t, err)
+			resumedAt := time.Now()
+
+			sj, err = sched.GetScheduledJob(ctx, "job")
+			require.NoError(t, err)
+			assert.False(t, sj.Suspended)
+			// the missed runs are skipped: the next run is computed from the trigger, not from the stale time
+			assert.Equal(t, resumedAt.Add(time.Second), sj.NextRunTime)
+
+			// resuming a job that is not suspended does nothing
+			err = sched.ResumeJob(ctx, "job")
+			require.NoError(t, err)
+			sj, err = sched.GetScheduledJob(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, resumedAt.Add(time.Second), sj.NextRunTime)
+
+			time.Sleep(1500 * time.Millisecond)
+
+			st, err = store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, resumedAt.Add(2*time.Second), st.When)
+		})
+	})
+
+	t.Run("a resumed job whose run time has not passed keeps it", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			firstRun := time.Now().Add(10 * time.Second)
+			err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second), scheduler.WithWhen(firstRun))
+			require.NoError(t, err)
+
+			require.NoError(t, sched.SuspendJob(ctx, "job"))
+			time.Sleep(time.Second)
+			require.NoError(t, sched.ResumeJob(ctx, "job"))
+
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.False(t, st.Suspended)
+			assert.Equal(t, firstRun, st.When)
+		})
+	})
+
+	t.Run("a resumed one-off job keeps its run time and runs right away if due", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			require.NoError(t, sched.RegisterOneOffJob("ad-hoc", &DummyJob{}))
+			sched.Start(ctx, 1)
+
+			due := time.Now().Add(time.Second)
+			err := sched.ScheduleOneOffJob(ctx, "ad-hoc:1", due, []byte("Ad hoc"))
+			require.NoError(t, err)
+			synctest.Wait()
+
+			require.NoError(t, sched.SuspendJob(ctx, "ad-hoc:1"))
+			time.Sleep(3 * time.Second)
+
+			st, err := store.Get(ctx, "ad-hoc:1")
+			require.NoError(t, err)
+			assert.True(t, st.Suspended)
+			assert.Equal(t, "Ad hoc", string(st.Payload))
+
+			require.NoError(t, sched.ResumeJob(ctx, "ad-hoc:1"))
+			st, err = store.Get(ctx, "ad-hoc:1")
+			require.NoError(t, err)
+			assert.False(t, st.Suspended)
+			assert.Equal(t, due, st.When)
+
+			// it runs immediately, and being a one-off job without trigger it is then removed
+			synctest.Wait()
+			_, err = store.Get(ctx, "ad-hoc:1")
+			require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+		})
+	})
+
+	t.Run("suspending a running job lets it finish but does not run it again", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			started := make(chan struct{})
+			release := make(chan struct{})
+			job := scheduler.JobFn(func(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+				close(started)
+				<-release
+				st.Payload = []byte("done")
+				return st, nil
+			})
+
+			firstRun := time.Now().Add(time.Second)
+			err := sched.ScheduleJob(ctx, "slow", job, trigger.NewSimpleTrigger(time.Second), scheduler.WithWhen(firstRun))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+
+			<-started
+			require.NoError(t, sched.SuspendJob(ctx, "slow"))
+			close(release)
+			synctest.Wait()
+
+			// the result of the run is kept and the task is rescheduled, but as suspended
+			st, err := store.Get(ctx, "slow")
+			require.NoError(t, err)
+			assert.Equal(t, "done", string(st.Payload))
+			assert.True(t, st.Suspended)
+			assert.Equal(t, firstRun.Add(time.Second), st.When)
+
+			// well past the next run time: nothing runs (the job would panic closing the started channel again)
+			time.Sleep(5 * time.Second)
+			st, err = store.Get(ctx, "slow")
+			require.NoError(t, err)
+			assert.Equal(t, firstRun.Add(time.Second), st.When)
+		})
+	})
+
+	t.Run("picks up a suspension and a resumption made by another replica or directly in the store", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store, scheduler.HeartbeatOption(time.Second))
+
+			start := time.Now()
+			firstRun := start.Add(time.Second)
+			err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second),
+				scheduler.WithWhen(firstRun), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+			// the worker is now parked on the timer for the first run
+			synctest.Wait()
+
+			// suspended behind the scheduler's back: no poke
+			require.NoError(t, store.Suspend(ctx, "job"))
+
+			time.Sleep(5 * time.Second)
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.True(t, st.Suspended)
+			assert.Equal(t, "Job", string(st.Payload), "the worker must not run the task it was parked on")
+
+			// resumed behind the scheduler's back, due in the future
+			resumeAt := time.Now().Add(3 * time.Second)
+			require.NoError(t, store.Resume(ctx, "job", resumeAt))
+
+			// found on the next heartbeat (at most 1s later), then run when due
+			time.Sleep(3500 * time.Millisecond)
+			st, err = store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.False(t, st.Suspended)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, resumeAt.Add(time.Second), st.When)
+		})
+	})
+
+	t.Run("the suspension survives a restart", func(t *testing.T) {
+		ctx := t.Context()
+		store := memory.New()
+
+		sched := scheduler.NewScheduler(store)
+		err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second))
+		require.NoError(t, err)
+		require.NoError(t, sched.SuspendJob(ctx, "job"))
+
+		// a new scheduler instance (or the same one after a restart) schedules the job again
+		sched = scheduler.NewScheduler(store)
+		err = sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second))
+		require.NoError(t, err)
+
+		sj, err := sched.GetScheduledJob(ctx, "job")
+		require.NoError(t, err)
+		assert.True(t, sj.Suspended)
+	})
+
+	t.Run("fails on an unknown job", func(t *testing.T) {
+		ctx := t.Context()
+		sched := scheduler.NewScheduler(memory.New())
+
+		require.ErrorIs(t, sched.SuspendJob(ctx, "unknown"), scheduler.ErrJobNotFound)
+		require.ErrorIs(t, sched.ResumeJob(ctx, "unknown"), scheduler.ErrJobNotFound)
+	})
+}
+
+func TestExecutionLoopStopsOnCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &failingStore{JobStore: memory.New()}
+		sched := scheduler.NewScheduler(store)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		sched.Start(ctx, 1)
+		// the loop hits the failing store and parks on the error back-off
+		synctest.Wait()
+		calls := store.calls()
+		require.Equal(t, 1, calls)
+
+		cancel()
+		synctest.Wait()
+
+		// a cancelled loop must not keep hitting the store
+		time.Sleep(time.Minute)
+		assert.Equal(t, calls, store.calls())
+	})
+}
+
+func TestUnregisteredOneOffTaskIsRemoved(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
+		store := memory.New()
+		// a one-off task stored by another replica, whose job is not registered here
+		err := store.Create(ctx, &scheduler.StoreTask{Slug: "unknown:1", When: time.Now().Add(time.Second)})
+		require.NoError(t, err)
+
+		sched := scheduler.NewScheduler(store)
+		sched.Start(ctx, 1)
+		time.Sleep(1500 * time.Millisecond)
+
+		_, err = store.Get(ctx, "unknown:1")
+		require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+	})
+}
+
+// failingStore fails every NextRun and counts the calls.
+type failingStore struct {
+	scheduler.JobStore
+	mu sync.Mutex
+	n  int
+}
+
+func (f *failingStore) NextRun(context.Context) (*scheduler.StoreTask, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n++
+	return nil, errors.New("store down")
+}
+
+func (f *failingStore) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
 }

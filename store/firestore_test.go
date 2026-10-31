@@ -33,6 +33,9 @@ func TestFireStore(t *testing.T) {
 	t.Run("firestore suspend", func(t *testing.T) {
 		testStoreSuspend(t, store)
 	})
+	t.Run("firestore update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
+	})
 }
 
 type FireConfig struct {

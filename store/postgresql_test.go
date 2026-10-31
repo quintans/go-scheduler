@@ -33,6 +33,9 @@ func TestPgStore(t *testing.T) {
 	t.Run("postgres suspend", func(t *testing.T) {
 		testStoreSuspend(t, store)
 	})
+	t.Run("postgres update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
+	})
 }
 
 type PgConfig struct {

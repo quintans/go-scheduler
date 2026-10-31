@@ -219,6 +219,18 @@ func (s *Store) Resume(ctx context.Context, slug string, when time.Time) error {
 	return nil
 }
 
+func (s *Store) UpdateTrigger(ctx context.Context, slug string, expr string, when time.Time) error {
+	_, err := s.modify(ctx, slug, func(e *Entry) (*Entry, error) {
+		e.Trigger = expr
+		e.When = when.UTC()
+		return e, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update trigger of '%s': %w", slug, err)
+	}
+	return nil
+}
+
 func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 	var slugs []string
 	iter := s.collectionRef().Documents(ctx)

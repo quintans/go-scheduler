@@ -128,7 +128,7 @@ func (pj DummyExecuter) Execute(_ context.Context, st *scheduler.Task) (*schedul
 	return st, nil
 }
 
-func TestLoadScheduleJob(t *testing.T) {
+func TestScheduleJob(t *testing.T) {
 	t.Run("uses the stored trigger instead of the default", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			ctx := t.Context()
@@ -145,7 +145,7 @@ func TestLoadScheduleJob(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour))
+			err = sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour))
 			require.NoError(t, err)
 
 			// the stored job is kept untouched
@@ -173,7 +173,7 @@ func TestLoadScheduleJob(t *testing.T) {
 			sched := scheduler.NewScheduler(store)
 
 			firstRun := time.Now().Add(time.Second)
-			err := sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
+			err := sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
 			// let the execution loop park on the first run timer before editing the store
@@ -201,29 +201,6 @@ func TestLoadScheduleJob(t *testing.T) {
 		})
 	})
 
-	t.Run("ScheduleJob keeps the registered trigger even if the store changes", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			ctx := t.Context()
-			store := memory.New()
-			sched := scheduler.NewScheduler(store)
-
-			firstRun := time.Now().Add(time.Second)
-			err := sched.ScheduleJob(ctx, "code-job", &DummyExecuter{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
-			require.NoError(t, err)
-			sched.Start(ctx, 1)
-			// let the execution loop park on the first run timer before editing the store
-			synctest.Wait()
-
-			editStoredTrigger(t, store, "code-job", "@every 5s")
-
-			time.Sleep(1500 * time.Millisecond)
-
-			st, err := store.Get(ctx, "code-job")
-			require.NoError(t, err)
-			assert.Equal(t, firstRun.Add(2*time.Second), st.When)
-		})
-	})
-
 	t.Run("falls back to the default trigger when the job is not stored", func(t *testing.T) {
 		ctx := t.Context()
 		store := memory.New()
@@ -232,7 +209,7 @@ func TestLoadScheduleJob(t *testing.T) {
 		cronTrigger, err := trigger.NewCronTrigger("0 0 * * * *")
 		require.NoError(t, err)
 		when := time.Now().Add(time.Hour)
-		err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, cronTrigger, scheduler.WithWhen(when))
+		err = sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, cronTrigger, scheduler.WithWhen(when))
 		require.NoError(t, err)
 
 		st, err := store.Get(ctx, "load-job")
@@ -251,16 +228,31 @@ func TestLoadScheduleJob(t *testing.T) {
 			err := store.Create(ctx, &scheduler.Task{Slug: "load-job", When: firstRun})
 			require.NoError(t, err)
 
-			err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(3*time.Second))
+			err = sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(3*time.Second))
 			require.NoError(t, err)
+
+			// the default is persisted, keeping the stored run time
+			st, err := store.Get(ctx, "load-job")
+			require.NoError(t, err)
+			assert.Equal(t, "@every 3s", st.Trigger)
+			assert.Equal(t, firstRun, st.When)
 
 			sched.Start(ctx, 1)
 			time.Sleep(1500 * time.Millisecond)
 
-			st, err := store.Get(ctx, "load-job")
+			st, err = store.Get(ctx, "load-job")
 			require.NoError(t, err)
 			assert.Equal(t, firstRun.Add(3*time.Second), st.When)
+			assert.Equal(t, "@every 3s", st.Trigger)
 		})
+	})
+
+	t.Run("fails on a slug reserved for one-off tasks", func(t *testing.T) {
+		ctx := t.Context()
+		sched := scheduler.NewScheduler(memory.New())
+
+		err := sched.ScheduleJob(ctx, "job:1", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
+		require.ErrorIs(t, err, scheduler.ErrInvalidJobSlug)
 	})
 
 	t.Run("fails on an invalid stored trigger", func(t *testing.T) {
@@ -271,7 +263,7 @@ func TestLoadScheduleJob(t *testing.T) {
 		err := store.Create(ctx, &scheduler.Task{Slug: "load-job", When: time.Now(), Trigger: "not a cron"})
 		require.NoError(t, err)
 
-		err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
+		err = sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
 		require.Error(t, err)
 	})
 
@@ -281,7 +273,7 @@ func TestLoadScheduleJob(t *testing.T) {
 		sched := scheduler.NewScheduler(memory.New())
 		sched.Start(ctx, 1)
 
-		err := sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
+		err := sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
 		require.Error(t, err)
 	})
 }
@@ -519,6 +511,237 @@ func TestSuspendResumeJob(t *testing.T) {
 		require.ErrorIs(t, sched.SuspendJob(ctx, "unknown"), scheduler.ErrTaskNotFound)
 		require.ErrorIs(t, sched.ResumeJob(ctx, "unknown"), scheduler.ErrTaskNotFound)
 	})
+}
+
+func TestChangeJobTrigger(t *testing.T) {
+	t.Run("reschedules a loaded job with the new trigger", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour),
+				scheduler.WithWhen(time.Now().Add(time.Hour)), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+			// the worker is parked, waiting for the run in one hour
+			synctest.Wait()
+
+			err = sched.ChangeJobTrigger(ctx, "job", trigger.NewSimpleTrigger(time.Second))
+			require.NoError(t, err)
+			changedAt := time.Now()
+
+			// the next run is recomputed from now with the new trigger and persisted along with its expression
+			sj, err := sched.GetScheduledJob(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, changedAt.Add(time.Second), sj.NextRunTime)
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "@every 1s", st.Trigger)
+
+			// the parked worker was woken up and runs the job at the new time
+			time.Sleep(1500 * time.Millisecond)
+			st, err = store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, changedAt.Add(2*time.Second), st.When)
+			assert.Equal(t, "@every 1s", st.Trigger)
+
+			// a cron trigger works the same way
+			cron, err := trigger.NewCronTrigger("0 0 * * * *")
+			require.NoError(t, err)
+			require.NoError(t, sched.ChangeJobTrigger(ctx, "job", cron))
+			st, err = store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "0 0 * * * *", st.Trigger)
+			assert.Equal(t, cron.Next(time.Now()), st.When)
+		})
+	})
+
+	t.Run("a suspended job keeps its suspension and uses the new trigger when resumed", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+			synctest.Wait()
+
+			require.NoError(t, sched.SuspendJob(ctx, "job"))
+			require.NoError(t, sched.ChangeJobTrigger(ctx, "job", trigger.NewSimpleTrigger(time.Second)))
+
+			time.Sleep(5 * time.Second)
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.True(t, st.Suspended)
+			assert.Equal(t, "@every 1s", st.Trigger)
+			assert.Equal(t, "Job", string(st.Payload), "a suspended job must not run")
+
+			require.NoError(t, sched.ResumeJob(ctx, "job"))
+			resumedAt := time.Now()
+
+			// the stale run time is recomputed with the new trigger
+			sj, err := sched.GetScheduledJob(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, resumedAt.Add(time.Second), sj.NextRunTime)
+
+			time.Sleep(1500 * time.Millisecond)
+			st, err = store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, resumedAt.Add(2*time.Second), st.When)
+		})
+	})
+
+	t.Run("a change made by another instance is picked up on the next heartbeat", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store, scheduler.HeartbeatOption(time.Second))
+
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+			synctest.Wait()
+
+			// e.g. an admin tool sharing the store, where the job is not registered
+			admin := scheduler.NewScheduler(store)
+			require.NoError(t, admin.ChangeJobTrigger(ctx, "job", trigger.NewSimpleTrigger(2*time.Second)))
+			changedAt := time.Now()
+
+			time.Sleep(2500 * time.Millisecond)
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, changedAt.Add(4*time.Second), st.When)
+			assert.Equal(t, "@every 2s", st.Trigger)
+		})
+	})
+
+	t.Run("the change survives a restart", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+
+			sched := scheduler.NewScheduler(store)
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			require.NoError(t, sched.ChangeJobTrigger(ctx, "job", trigger.NewSimpleTrigger(time.Second)))
+			changedAt := time.Now()
+
+			// a new scheduler instance (or the same one after a restart) loads the job again with the same default
+			sched = scheduler.NewScheduler(store)
+			err = sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+
+			time.Sleep(1500 * time.Millisecond)
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, "@every 1s", st.Trigger)
+			assert.Equal(t, changedAt.Add(2*time.Second), st.When)
+		})
+	})
+
+	t.Run("a run in progress is rescheduled with the previous trigger, the new one applies afterwards", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+
+			firstRun := time.Now().Add(time.Second)
+			err := sched.ScheduleJob(ctx, "job", &slowExecuter{duration: 2 * time.Second}, trigger.NewSimpleTrigger(10*time.Second),
+				scheduler.WithWhen(firstRun), scheduler.WithPayload([]byte("Job")))
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+
+			// the job is running
+			time.Sleep(1500 * time.Millisecond)
+			require.NoError(t, sched.ChangeJobTrigger(ctx, "job", trigger.NewSimpleTrigger(3*time.Second)))
+
+			// the run finishes and is rescheduled with the trigger read when it was locked
+			time.Sleep(2 * time.Second)
+			st, err := store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#1", string(st.Payload))
+			assert.Equal(t, "@every 3s", st.Trigger)
+			assert.Equal(t, firstRun.Add(10*time.Second), st.When)
+
+			// from then on the new trigger is used
+			time.Sleep(firstRun.Add(10*time.Second).Sub(time.Now()) + 2500*time.Millisecond)
+			st, err = store.Get(ctx, "job")
+			require.NoError(t, err)
+			assert.Equal(t, "Job#2", string(st.Payload))
+			assert.Equal(t, firstRun.Add(13*time.Second), st.When)
+		})
+	})
+
+	t.Run("fails when the trigger cannot be changed", func(t *testing.T) {
+		ctx := t.Context()
+		store := memory.New()
+		sched := scheduler.NewScheduler(store)
+
+		err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour))
+		require.NoError(t, err)
+
+		require.NoError(t, sched.RegisterOneOffJob("oo-job", &DummyExecuter{}))
+		sched.Start(ctx, 1)
+		ooSlug, err := sched.ScheduleOneOffJob(ctx, "oo-job", time.Now().Add(time.Hour), nil)
+		require.NoError(t, err)
+
+		second := trigger.NewSimpleTrigger(time.Second)
+		// unknown job
+		require.ErrorIs(t, sched.ChangeJobTrigger(ctx, "unknown", second), scheduler.ErrTaskNotFound)
+		// one-off jobs never recur
+		require.ErrorIs(t, sched.ChangeJobTrigger(ctx, ooSlug, second), scheduler.ErrOneOffJob)
+		// a trigger without expression cannot be persisted
+		require.ErrorIs(t, sched.ChangeJobTrigger(ctx, "job", opaqueTrigger{}), scheduler.ErrTriggerNotPersistent)
+		require.Error(t, sched.ChangeJobTrigger(ctx, "job", nil))
+
+		// nothing was changed
+		st, err := store.Get(ctx, "job")
+		require.NoError(t, err)
+		assert.Equal(t, "@every 1h0m0s", st.Trigger)
+		st, err = store.Get(ctx, ooSlug)
+		require.NoError(t, err)
+		assert.Empty(t, st.Trigger)
+	})
+
+	t.Run("a one-off task does not recur even with a trigger stored for it", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+			require.NoError(t, sched.RegisterOneOffJob("oo-job", &DummyExecuter{}))
+
+			// simulate an edit made directly in the store
+			err := store.Create(ctx, &scheduler.Task{Slug: "oo-job:1", When: time.Now().Add(time.Second), Trigger: "@every 1s"})
+			require.NoError(t, err)
+			sched.Start(ctx, 1)
+
+			time.Sleep(1500 * time.Millisecond)
+			_, err = store.Get(ctx, "oo-job:1")
+			require.ErrorIs(t, err, scheduler.ErrTaskNotFound, "the task must be removed after its single run")
+		})
+	})
+}
+
+// opaqueTrigger is a trigger without a string expression.
+type opaqueTrigger struct{}
+
+func (opaqueTrigger) Next(prev time.Time) time.Time { return prev.Add(time.Second) }
+
+// slowExecuter behaves like DummyExecuter but takes duration to run.
+type slowExecuter struct {
+	duration time.Duration
+}
+
+func (e *slowExecuter) Execute(ctx context.Context, st *scheduler.Task) (*scheduler.Task, error) {
+	time.Sleep(e.duration)
+	return DummyExecuter{}.Execute(ctx, st)
 }
 
 func TestExecutionLoopStopsOnCancel(t *testing.T) {

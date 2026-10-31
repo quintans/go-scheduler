@@ -36,6 +36,9 @@ func TestMongoStore(t *testing.T) {
 	t.Run("mongodb suspend", func(t *testing.T) {
 		testStoreSuspend(t, store)
 	})
+	t.Run("mongodb update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
+	})
 }
 
 func mongoSetup() (string, func(), error) {

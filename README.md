@@ -104,6 +104,9 @@ type Store interface {
 	// Resume clears the suspension and sets the next run time of the task.
 	Resume(ctx context.Context, slug string, when time.Time) error
 	
+	// UpdateTrigger replaces the trigger expression of the task and sets its next run time.
+	UpdateTrigger(ctx context.Context, slug string, expr string, when time.Time) error
+	
 	// GetSlugs returns the slugs of all the tasks.
 	GetSlugs(context.Context) ([]string, error)
 	
@@ -186,14 +189,13 @@ sched.ScheduleJob(ctx, "print-job", pj, cronTrigger)
 sched.Start(ctx, 1)
 ```
 
-### Loading the Trigger from the Store
+### Persisted Triggers
 
-When a job is scheduled, its trigger expression is persisted alongside the job (cron expressions as given, simple triggers as `@every <duration>`).
-`LoadScheduleJob` reads that expression back from the store and uses it to schedule the job, so the schedule can be changed directly in the store without a new deployment.
-The provided trigger is only used as a default when the job is not in the store yet (or was stored without a trigger).
+The trigger persisted in the store always takes precedence over the one given in code.
+`ScheduleJob` reads the stored expression and uses it to schedule the job, so the schedule can be changed in the store without a new deployment.
+The provided trigger is only a default, used when the job is not in the store yet (or was stored without a trigger); in that case its expression is persisted (cron expressions as given, simple triggers as `@every <duration>`).
 
-The stored expression is re-read every time the job runs, so editing it in the store while the scheduler is running takes effect on the next execution (an invalid expression is logged and the default trigger is used instead).
-Jobs scheduled with `ScheduleJob` always keep the trigger given in code.
+The stored expression is re-read every time the job runs, so a change made while the scheduler is running takes effect on the next execution (an invalid expression is logged and the default trigger is used instead).
 
 ```go
 ctx := context.Background()
@@ -203,12 +205,32 @@ sched := scheduler.NewScheduler(store)
 // Used only the first time, when nothing is stored for "print-job" yet.
 // On the next start-up the trigger stored for "print-job" takes precedence.
 defaultTrigger, _ := trigger.NewCronTrigger("@hourly")
-sched.LoadScheduleJob(ctx, "print-job", &PrintExecuter{}, defaultTrigger)
+sched.ScheduleJob(ctx, "print-job", &PrintExecuter{}, defaultTrigger)
 
 sched.Start(ctx, 1)
 ```
 
 For the PostgreSQL store this requires a `trigger_expr TEXT` column in the schedules table. The MongoDB store persists it in the `trigger_expr` field.
+
+### Changing the Trigger
+
+Instead of editing the store by hand, the trigger of a job can be changed through the scheduler.
+The new expression is persisted, so the change survives restarts and is honoured by every scheduler instance sharing the store, and the next run time is recomputed from now with the new trigger.
+
+```go
+// from now on "print-job" runs every 5 minutes
+sched.ChangeJobTrigger(ctx, "print-job", trigger.NewSimpleTrigger(5*time.Minute))
+
+sj, _ := sched.GetScheduledJob(ctx, "print-job")
+fmt.Println(sj.NextRunTime) // now + 5 minutes
+```
+
+A few things to keep in mind:
+- the job does not need to be registered in the instance that makes the change (e.g. an admin tool sharing the store); other instances pick the change up at the latest on the next heartbeat;
+- a suspended job keeps its suspension, the new trigger is used once it is resumed;
+- if a run is in progress, it is rescheduled with the trigger it was started with, the new trigger takes effect on the run after that one;
+- the trigger must have a string expression (`trigger.Expressioner`, as cron and simple triggers do), otherwise it fails with `ErrTriggerNotPersistent`;
+- one-off jobs never recur, so changing the trigger of one of their tasks fails with `ErrOneOffJob`.
 
 ### Suspending Jobs
 
@@ -233,6 +255,8 @@ The scheduler never caches the suspension state, it is read from the store on ev
 For the PostgreSQL store this requires a `suspended BOOLEAN NOT NULL DEFAULT FALSE` column in the schedules table. The MongoDB and Firestore stores persist it in the `suspended` field (a missing field means not suspended).
 
 ### One-off Jobs
+
+A one-off job is registered once and each of its runs is scheduled individually. Every run executes once and is then removed: one-off jobs have no trigger and never recur.
 
 ```go
 ctx := context.Background()

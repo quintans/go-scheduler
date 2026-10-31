@@ -221,14 +221,18 @@ func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
 }
 
 func (s *Store) Suspend(ctx context.Context, slug string) error {
-	return s.updateSuspended(ctx, fmt.Sprintf("UPDATE %s SET suspended = TRUE WHERE slug = $1", s.tableName), "suspend", slug)
+	return s.updateBySlug(ctx, fmt.Sprintf("UPDATE %s SET suspended = TRUE WHERE slug = $1", s.tableName), "suspend", slug)
 }
 
 func (s *Store) Resume(ctx context.Context, slug string, when time.Time) error {
-	return s.updateSuspended(ctx, fmt.Sprintf("UPDATE %s SET suspended = FALSE, run_at = $2 WHERE slug = $1", s.tableName), "resume", slug, when.UTC())
+	return s.updateBySlug(ctx, fmt.Sprintf("UPDATE %s SET suspended = FALSE, run_at = $2 WHERE slug = $1", s.tableName), "resume", slug, when.UTC())
 }
 
-func (s *Store) updateSuspended(ctx context.Context, query string, action string, slug string, args ...any) error {
+func (s *Store) UpdateTrigger(ctx context.Context, slug string, expr string, when time.Time) error {
+	return s.updateBySlug(ctx, fmt.Sprintf("UPDATE %s SET trigger_expr = $2, run_at = $3 WHERE slug = $1", s.tableName), "update trigger of", slug, expr, when.UTC())
+}
+
+func (s *Store) updateBySlug(ctx context.Context, query string, action string, slug string, args ...any) error {
 	res, err := s.db.ExecContext(ctx, query, append([]any{slug}, args...)...)
 	if err != nil {
 		return fmt.Errorf("failed to %s '%s': %w", action, slug, err)

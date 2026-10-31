@@ -212,14 +212,18 @@ func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
 }
 
 func (s *Store) Suspend(ctx context.Context, slug string) error {
-	return s.updateSuspended(ctx, "suspend", slug, bson.D{{Key: "suspended", Value: true}})
+	return s.updateBySlug(ctx, "suspend", slug, bson.D{{Key: "suspended", Value: true}})
 }
 
 func (s *Store) Resume(ctx context.Context, slug string, when time.Time) error {
-	return s.updateSuspended(ctx, "resume", slug, bson.D{{Key: "suspended", Value: false}, {Key: "run_at", Value: when.UTC()}})
+	return s.updateBySlug(ctx, "resume", slug, bson.D{{Key: "suspended", Value: false}, {Key: "run_at", Value: when.UTC()}})
 }
 
-func (s *Store) updateSuspended(ctx context.Context, action string, slug string, set bson.D) error {
+func (s *Store) UpdateTrigger(ctx context.Context, slug string, expr string, when time.Time) error {
+	return s.updateBySlug(ctx, "update trigger of", slug, bson.D{{Key: "trigger_expr", Value: expr}, {Key: "run_at", Value: when.UTC()}})
+}
+
+func (s *Store) updateBySlug(ctx context.Context, action string, slug string, set bson.D) error {
 	res, err := s.collection().UpdateOne(
 		ctx,
 		bson.D{{Key: "_id", Value: slug}},

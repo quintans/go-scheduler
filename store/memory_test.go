@@ -17,4 +17,7 @@ func TestMemStore(t *testing.T) {
 	t.Run("memory suspend", func(t *testing.T) {
 		testStoreSuspend(t, store)
 	})
+	t.Run("memory update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
+	})
 }

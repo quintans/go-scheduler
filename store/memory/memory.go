@@ -98,8 +98,9 @@ func (s *MemStore) Reschedule(ctx context.Context, job *scheduler.Task) error {
 	if ok {
 		delete(s.locked, job.Slug)
 		job.Version++
-		// the suspension is owned by the store and may have changed while the job was running
+		// the suspension and the trigger expression are owned by the store and may have changed while the job was running
 		job.Suspended = entry.Suspended
+		job.Trigger = entry.Trigger
 		entry.Task = job
 		heap.Push(s.queue, entry)
 		return nil
@@ -134,6 +135,24 @@ func (s *MemStore) Resume(_ context.Context, slug string, when time.Time) error 
 	}
 
 	entry.Suspended = false
+	entry.When = when
+	if queued {
+		heap.Fix(s.queue, entry.index)
+	}
+
+	return nil
+}
+
+func (s *MemStore) UpdateTrigger(_ context.Context, slug string, expr string, when time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, queued := s.find(slug)
+	if entry == nil {
+		return fmt.Errorf("update trigger of task '%s': %w", slug, scheduler.ErrTaskNotFound)
+	}
+
+	entry.Trigger = expr
 	entry.When = when
 	if queued {
 		heap.Fix(s.queue, entry.index)

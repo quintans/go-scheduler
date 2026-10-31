@@ -23,6 +23,10 @@ type Store interface {
 	// The lock, if any, is left untouched.
 	// Fails with ErrTaskNotFound if the task does not exist.
 	Resume(ctx context.Context, slug string, when time.Time) error
+	// UpdateTrigger replaces the trigger expression of the task and sets its next run time to when.
+	// The lock and the suspension, if any, are left untouched.
+	// Fails with ErrTaskNotFound if the task does not exist.
+	UpdateTrigger(ctx context.Context, slug string, expr string, when time.Time) error
 	// GetSlugs gets the slugs of all the tasks
 	GetSlugs(context.Context) ([]string, error)
 	// Get gets a task by its slug

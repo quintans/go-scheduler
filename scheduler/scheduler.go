@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quintans/go-scheduler/internal/lib"
 	"github.com/quintans/go-scheduler/trigger"
 )
 
@@ -74,9 +73,11 @@ type ScheduledJob struct {
 // A Scheduler is the Jobs orchestrator.
 // It is responsible for executing Jobs when their associated Triggers fire (when their scheduled time arrives).
 type Scheduler struct {
-	running   bool
-	store     JobStore
-	waiters   []*lib.Waiter
+	running bool
+	store   JobStore
+	// one wake-up channel per worker. Each has a buffer of one, so a poke that arrives
+	// while the worker is busy (e.g. querying the store) is remembered and not lost.
+	wakes     []chan struct{}
 	heartbeat time.Duration
 	// to avoid concurrent instances to collide when locking we can add some randomness
 	jitter time.Duration
@@ -287,29 +288,21 @@ func (s *Scheduler) Start(ctx context.Context, workers int) {
 		workers = 1
 	}
 
-	s.waiters = make([]*lib.Waiter, workers)
-	for i := 0; i < workers; i++ {
-		s.waiters[i] = lib.NewWaiter()
-	}
-
-	// start scheduler execution loop
-	for _, waiter := range s.waiters {
-		go s.startExecutionLoop(ctx, waiter)
-
-		if s.heartbeat > 0 {
-			go s.startHeartbeat(ctx, waiter)
-		}
+	s.wakes = make([]chan struct{}, workers)
+	for i := range s.wakes {
+		s.wakes[i] = make(chan struct{}, 1)
+		go s.startExecutionLoop(ctx, s.wakes[i])
 	}
 }
 
+// pokeWaiters wakes up all workers so that they re-read the store.
+// Pokes are coalesced: if a worker already has a pending poke, nothing is added.
 func (s *Scheduler) pokeWaiters() {
-	for _, waiter := range s.waiters {
-		go func() {
-			if s.jitter > 0 {
-				time.Sleep(time.Duration(rand.Int63n(int64(s.jitter))))
-			}
-			waiter.Poke()
-		}()
+	for _, wake := range s.wakes {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -321,7 +314,7 @@ type ScheduleOneOffJobOptions struct {
 // ScheduleOneOffJob schedules short lived jobs
 //
 // slug will have the form <job-name>:<anything> to ensure uniqueness.
-// Tipically <anything> can be a UUID or a timestamp.
+// Typically <anything> can be a UUID or a timestamp.
 func (s *Scheduler) ScheduleOneOffJob(ctx context.Context, slug string, when time.Time, payload []byte) error {
 	if !s.running {
 		return fmt.Errorf("cannot schedule one-off job before scheduler has started job: '%s'", slug)
@@ -385,52 +378,74 @@ func (s *Scheduler) Clear(ctx context.Context) error {
 	return s.store.Clear(ctx)
 }
 
-func (s *Scheduler) startExecutionLoop(ctx context.Context, waiter *lib.Waiter) {
+func (s *Scheduler) startExecutionLoop(ctx context.Context, wake <-chan struct{}) {
 	for {
-		run, task, err := s.calculateNextRun(ctx)
+		task, park, err := s.calculateNextRun(ctx)
 		if err != nil {
 			s.logger.Error("failed to calculate next run: %v", err)
 			time.Sleep(waitOnCalculateNextRunError)
 			continue
 		}
-		if run == nil {
-			select {
-			case <-waiter.Wait():
-			case <-ctx.Done():
-				return
-			}
-		} else {
-			select {
-			case <-run.C:
-				err := s.executeAndReschedule(ctx, task)
-				if err != nil && !errors.Is(err, ErrJobNotLocked) {
-					s.logger.Error("failed to execute and reschedule task: %+v", err)
-				}
-			case <-waiter.Wait():
-				run.Stop()
+
+		// a nil channel blocks forever: no task and no heartbeat means wait for a poke
+		var timer *time.Timer
+		var due <-chan time.Time
+		if park >= 0 {
+			timer = time.NewTimer(park)
+			due = timer.C
+		}
+
+		select {
+		case <-due:
+			if task == nil {
+				// heartbeat: re-read the store
 				continue
-			case <-ctx.Done():
-				run.Stop()
-				return
 			}
+			err := s.executeAndReschedule(ctx, task)
+			if err != nil && !errors.Is(err, ErrJobNotLocked) {
+				s.logger.Error("failed to execute and reschedule task: %+v", err)
+			}
+		case <-wake:
+			stopTimer(timer)
+		case <-ctx.Done():
+			stopTimer(timer)
+			return
 		}
 	}
 }
 
-func (s *Scheduler) calculateNextRun(ctx context.Context) (*time.Timer, *StoreTask, error) {
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
+}
+
+// calculateNextRun returns the next task to run and how long to wait before running it.
+// The wait is capped at the heartbeat, so that the store is re-read periodically to pick up
+// changes made by other instances.
+// If there is no task, the returned task is nil and the wait is the heartbeat.
+// A negative wait means wait indefinitely (no task and no heartbeat).
+func (s *Scheduler) calculateNextRun(ctx context.Context) (*StoreTask, time.Duration, error) {
 	task, err := s.store.NextRun(ctx)
 	if errors.Is(err, ErrJobNotFound) {
-		return nil, nil, nil
+		if s.heartbeat > 0 {
+			return nil, s.heartbeat, nil
+		}
+		return nil, -1, nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 
 	park := parkTime(task.When)
 	if s.jitter > 0 {
-		park = time.Duration(int64(park) + rand.Int63n(int64(s.jitter)))
+		park += time.Duration(rand.Int63n(int64(s.jitter)))
 	}
-	return time.NewTimer(park), task, nil
+	if s.heartbeat > 0 && park > s.heartbeat {
+		// re-read the store before the task is due, something may have changed in the meantime
+		return nil, s.heartbeat, nil
+	}
+	return task, park, nil
 }
 
 func (s *Scheduler) executeAndReschedule(ctx context.Context, st *StoreTask) error {
@@ -542,19 +557,6 @@ func (s *Scheduler) resolveTrigger(task Task, storeTask *StoreTask) trigger.Trig
 	}
 
 	return trg
-}
-
-func (s *Scheduler) startHeartbeat(ctx context.Context, waiter *lib.Waiter) {
-	ticker := time.NewTicker(s.heartbeat)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			waiter.Poke()
-		}
-	}
 }
 
 func parkTime(ts time.Time) time.Duration {

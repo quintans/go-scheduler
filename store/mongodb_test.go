@@ -28,9 +28,16 @@ func TestMongoStore(t *testing.T) {
 	require.NoError(t, client.Ping(ctx, nil))
 
 	store := mongodb.New(client.Database("scheduler"))
-	require.NoError(t, store.CreateIndexes(ctx))
+	require.NoError(t, store.CreateSchema(ctx))
+	require.NoError(t, store.CreateSchema(ctx), "creating the schema twice is fine")
 	t.Run("mongodb", func(t *testing.T) {
 		testScheduler(t, store)
+	})
+	t.Run("mongodb suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
+	t.Run("mongodb update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
 	})
 }
 

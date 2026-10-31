@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/quintans/go-scheduler/scheduler"
 )
@@ -24,67 +25,155 @@ func New() *MemStore {
 	}
 }
 
-func (s *MemStore) Create(_ context.Context, task *scheduler.StoreTask) error {
+// CreateSchema makes sure that the store is ready to be used.
+// The memory store needs no setup, so this does nothing.
+// It is provided so that every store offers the same setup entry point.
+func (s *MemStore) CreateSchema(context.Context) error {
+	return nil
+}
+
+func (s *MemStore) Create(_ context.Context, job *scheduler.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, entry := range *s.queue {
-		if entry.Slug == task.Slug {
-			return fmt.Errorf("create task '%s': %w", task.Slug, scheduler.ErrJobAlreadyExists)
+		if entry.Slug == job.Slug {
+			return fmt.Errorf("create task '%s': %w", job.Slug, scheduler.ErrTaskAlreadyExists)
 		}
 	}
 
 	heap.Push(s.queue, &MemEntry{
-		StoreTask: task,
+		Task: job,
 	})
 
 	return nil
 }
 
-func (s *MemStore) NextRun(context.Context) (*scheduler.StoreTask, error) {
+func (s *MemStore) NextRun(context.Context) (*scheduler.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.queue.Len() == 0 {
-		return nil, scheduler.ErrJobNotFound
+	// suspended entries are kept at the end of the queue, so if the head is suspended there is nothing to run
+	if s.queue.Len() == 0 || s.queue.Head().Suspended {
+		return nil, scheduler.ErrTaskNotFound
 	}
 
-	ts := s.queue.Head().When
+	head := s.queue.Head()
 
-	return &scheduler.StoreTask{
-		When: ts,
+	return &scheduler.Task{
+		Slug:    head.Slug,
+		When:    head.When,
+		Version: head.Version,
 	}, nil
 }
 
-func (s *MemStore) Lock(context.Context, *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+func (s *MemStore) Lock(_ context.Context, job *scheduler.Task) (*scheduler.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.queue.Len() == 0 {
-		return nil, scheduler.ErrJobNotFound
+		return nil, scheduler.ErrTaskNotFound
 	}
 
 	// Lock by popping.
 	// Since this is in memory, we assume that this is being called when the timer has expired.
+	// The head must still be the job found by NextRun: it may have been suspended, resumed or deleted in the meantime.
+	head := s.queue.Head()
+	if head.Suspended || head.Slug != job.Slug || head.Version != job.Version {
+		return nil, scheduler.ErrTaskNotLocked
+	}
 	entry := heap.Pop(s.queue).(*MemEntry)
 	s.locked[entry.Slug] = entry
 
-	return entry.StoreTask, nil
+	// hand out a copy, so that changes made to the stored task while it runs (suspend, resume) do not race with the job
+	locked := *entry.Task
+	return &locked, nil
 }
 
-func (s *MemStore) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
+func (s *MemStore) Reschedule(ctx context.Context, job *scheduler.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.locked[task.Slug]
+	entry, ok := s.locked[job.Slug]
 	if ok {
-		delete(s.locked, task.Slug)
-		task.Version++
-		entry.StoreTask = task
+		delete(s.locked, job.Slug)
+		job.Version++
+		// the suspension and the trigger expression are owned by the store and may have changed while the job was running
+		job.Suspended = entry.Suspended
+		job.Trigger = entry.Trigger
+		entry.Task = job
 		heap.Push(s.queue, entry)
 		return nil
 	}
-	return scheduler.ErrJobNotFound
+	return scheduler.ErrTaskNotFound
+}
+
+func (s *MemStore) Suspend(_ context.Context, slug string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, queued := s.find(slug)
+	if entry == nil {
+		return fmt.Errorf("suspend task '%s': %w", slug, scheduler.ErrTaskNotFound)
+	}
+
+	entry.Suspended = true
+	if queued {
+		heap.Fix(s.queue, entry.index)
+	}
+
+	return nil
+}
+
+func (s *MemStore) Resume(_ context.Context, slug string, when time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, queued := s.find(slug)
+	if entry == nil {
+		return fmt.Errorf("resume task '%s': %w", slug, scheduler.ErrTaskNotFound)
+	}
+
+	entry.Suspended = false
+	entry.When = when
+	if queued {
+		heap.Fix(s.queue, entry.index)
+	}
+
+	return nil
+}
+
+func (s *MemStore) UpdateTrigger(_ context.Context, slug string, expr string, when time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, queued := s.find(slug)
+	if entry == nil {
+		return fmt.Errorf("update trigger of task '%s': %w", slug, scheduler.ErrTaskNotFound)
+	}
+
+	entry.Trigger = expr
+	entry.When = when
+	if queued {
+		heap.Fix(s.queue, entry.index)
+	}
+
+	return nil
+}
+
+// find returns the entry with the given slug, either queued or locked, and whether it is queued.
+// The caller must hold the lock.
+func (s *MemStore) find(slug string) (entry *MemEntry, queued bool) {
+	for _, entry := range *s.queue {
+		if entry.Slug == slug {
+			return entry, true
+		}
+	}
+	if entry, ok := s.locked[slug]; ok {
+		return entry, false
+	}
+
+	return nil, false
 }
 
 func (s *MemStore) GetSlugs(context.Context) ([]string, error) {
@@ -103,22 +192,22 @@ func (s *MemStore) GetSlugs(context.Context) ([]string, error) {
 	return slugs, nil
 }
 
-func (s *MemStore) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
+func (s *MemStore) Get(ctx context.Context, slug string) (*scheduler.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, entry := range *s.queue {
 		if entry.Slug == slug {
-			return entry.StoreTask, nil
+			return entry.Task, nil
 		}
 	}
 	for _, entry := range s.locked {
 		if entry.Slug == slug {
-			return entry.StoreTask, nil
+			return entry.Task, nil
 		}
 	}
 
-	return nil, fmt.Errorf("get task '%s': %w", slug, scheduler.ErrJobNotFound)
+	return nil, fmt.Errorf("get task '%s': %w", slug, scheduler.ErrTaskNotFound)
 }
 
 func (s *MemStore) Delete(ctx context.Context, slug string) error {
@@ -138,7 +227,7 @@ func (s *MemStore) Delete(ctx context.Context, slug string) error {
 		return nil
 	}
 
-	return fmt.Errorf("delete task '%s': %w", slug, scheduler.ErrJobNotFound)
+	return fmt.Errorf("delete task '%s': %w", slug, scheduler.ErrTaskNotFound)
 }
 
 func (s *MemStore) Clear(context.Context) error {
@@ -152,7 +241,7 @@ func (s *MemStore) Clear(context.Context) error {
 }
 
 type MemEntry struct {
-	*scheduler.StoreTask
+	*scheduler.Task
 	index int
 }
 
@@ -163,7 +252,11 @@ type PriorityQueue []*MemEntry
 func (pq PriorityQueue) Len() int { return len(pq) }
 
 // Less is the items less comparator.
+// Suspended entries go last, so the head of the queue is always the next runnable entry, if any.
 func (pq PriorityQueue) Less(i, j int) bool {
+	if pq[i].Suspended != pq[j].Suspended {
+		return !pq[i].Suspended
+	}
 	return pq[i].When.Before(pq[j].When)
 }
 

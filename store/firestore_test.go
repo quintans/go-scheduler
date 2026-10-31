@@ -26,8 +26,15 @@ func TestFireStore(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	store := firestore.New(db)
+	require.NoError(t, store.CreateSchema(t.Context()))
 	t.Run("firestore", func(t *testing.T) {
 		testScheduler(t, store)
+	})
+	t.Run("firestore suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
+	t.Run("firestore update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
 	})
 }
 

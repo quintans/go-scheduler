@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testScheduler(t *testing.T, store scheduler.JobStore) {
+func testScheduler(t *testing.T, store scheduler.Store) {
 	sched := scheduler.NewScheduler(
 		store,
 		scheduler.HeartbeatOption(time.Second),
@@ -22,19 +22,19 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 
 	backoff := trigger.NewExponentialBackoff(trigger.StdSchedulerIncBackoffOption(100 * time.Millisecond))
 
-	goodJob := &DummyJob{kind: "curl-good", err: nil}
-	badJob := &DummyJob{kind: "curl-bad", err: errors.New("curl error")}
+	goodExecuter := &DummyExecuter{kind: "curl-good", err: nil}
+	badExecuter := &DummyExecuter{kind: "curl-bad", err: errors.New("curl error")}
 
 	ctx := t.Context()
 	// for static (repeating) jobs,  we provide a trigger. We usually don't provide payload
-	err := sched.ScheduleJob(ctx, "good-job", goodJob, trigger.NewSimpleTrigger(time.Millisecond*700))
+	err := sched.ScheduleJob(ctx, "good-job", goodExecuter, trigger.NewSimpleTrigger(time.Millisecond*700))
 	require.NoError(t, err)
-	err = sched.ScheduleJob(ctx, "bad-job", badJob, trigger.NewSimpleTrigger(time.Millisecond*800), scheduler.WithBackoff(backoff))
+	err = sched.ScheduleJob(ctx, "bad-job", badExecuter, trigger.NewSimpleTrigger(time.Millisecond*800), scheduler.WithBackoff(backoff))
 	require.NoError(t, err)
 	// one off
-	err = sched.RegisterOneOffJob("good-job-oo", goodJob)
+	err = sched.RegisterOneOffJob("good-job-oo", goodExecuter)
 	require.NoError(t, err)
-	err = sched.RegisterOneOffJob("bad-job-oo", badJob)
+	err = sched.RegisterOneOffJob("bad-job-oo", badExecuter)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -43,15 +43,15 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 
 	// dynamic jobs, receive execution parameters though the payload argument
 	now := time.Now()
-	err = sched.ScheduleOneOffJob(ctx, "good-job-oo:1", now.Add(time.Millisecond*700), []byte("OK"))
+	_, err = sched.ScheduleOneOffJob(ctx, "good-job-oo", now.Add(time.Millisecond*700), []byte("OK"))
 	require.NoError(t, err)
-	err = sched.ScheduleOneOffJob(ctx, "bad-job-oo:1", now.Add(time.Millisecond), []byte("BAD"))
+	badJobOOSlug, err := sched.ScheduleOneOffJob(ctx, "bad-job-oo", now.Add(time.Millisecond), []byte("BAD"))
 	require.NoError(t, err)
 
 	time.Sleep(4 * time.Second)
 	scheduledJobKeys, err := sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"bad-job", "good-job", "bad-job-oo:1"}, scheduledJobKeys)
+	require.ElementsMatch(t, []string{"bad-job", "good-job", badJobOOSlug}, scheduledJobKeys)
 
 	_, err = sched.GetScheduledJob(ctx, "good-job")
 	require.NoError(t, err)
@@ -64,11 +64,11 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	err = sched.DeleteJob(ctx, "good-job")
 	require.NoError(t, err)
 	_, err = store.Get(ctx, "good-job")
-	require.True(t, errors.Is(err, scheduler.ErrJobNotFound))
+	require.True(t, errors.Is(err, scheduler.ErrTaskNotFound))
 
 	scheduledJobKeys, err = sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"bad-job", "bad-job-oo:1"}, scheduledJobKeys)
+	require.ElementsMatch(t, []string{"bad-job", badJobOOSlug}, scheduledJobKeys)
 
 	cancel()
 	ctx = context.Background()
@@ -77,23 +77,165 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
 
-	st, err = store.Get(ctx, "bad-job-oo:1")
+	st, err = store.Get(ctx, badJobOOSlug)
 	require.NoError(t, err)
 	require.False(t, st.IsOK())
 }
 
-// DummyJob implements the scheduler.Job interface.
-type DummyJob struct {
+// testStoreSuspend exercises the Suspend/Resume operations of the store directly.
+func testStoreSuspend(t *testing.T, store scheduler.Store) {
+	ctx := t.Context()
+	require.NoError(t, store.Clear(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	err := store.Create(ctx, &scheduler.Task{Slug: "paused", When: now.Add(-time.Second), Trigger: "@every 1s"})
+	require.NoError(t, err)
+	err = store.Create(ctx, &scheduler.Task{Slug: "later", When: now.Add(time.Hour)})
+	require.NoError(t, err)
+
+	// the earliest job is the next to run
+	next, err := store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "paused", next.Slug)
+
+	require.NoError(t, store.Suspend(ctx, "paused"))
+	require.NoError(t, store.Suspend(ctx, "paused"), "suspending twice is fine")
+
+	st, err := store.Get(ctx, "paused")
+	require.NoError(t, err)
+	require.True(t, st.Suspended)
+	require.Equal(t, "@every 1s", st.Trigger)
+
+	// a suspended job is skipped, even if it is due
+	next, err = store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "later", next.Slug)
+	require.False(t, next.Suspended)
+
+	// and cannot be locked
+	_, err = store.Lock(ctx, st)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotLocked)
+
+	// when it is the only job, there is nothing to run
+	require.NoError(t, store.Delete(ctx, "later"))
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
+
+	when := now.Add(time.Minute)
+	require.NoError(t, store.Resume(ctx, "paused", when))
+
+	next, err = store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "paused", next.Slug)
+	require.Equal(t, when, next.When)
+
+	st, err = store.Get(ctx, "paused")
+	require.NoError(t, err)
+	require.False(t, st.Suspended)
+	require.Equal(t, when, st.When)
+	require.Equal(t, "@every 1s", st.Trigger)
+
+	// a locked (running) job can be suspended; the lock is kept
+	locked, err := store.Lock(ctx, next)
+	require.NoError(t, err)
+	require.NoError(t, store.Suspend(ctx, "paused"))
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
+	// once rescheduled at the end of the run, the job keeps the run result but stays suspended
+	locked.Payload = []byte("ran")
+	locked.When = when.Add(time.Minute)
+	require.NoError(t, store.Reschedule(ctx, locked))
+	st, err = store.Get(ctx, "paused")
+	require.NoError(t, err)
+	require.True(t, st.Suspended)
+	require.Equal(t, "ran", string(st.Payload))
+	require.Equal(t, when.Add(time.Minute), st.When)
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
+
+	require.ErrorIs(t, store.Suspend(ctx, "unknown"), scheduler.ErrTaskNotFound)
+	require.ErrorIs(t, store.Resume(ctx, "unknown", when), scheduler.ErrTaskNotFound)
+
+	require.NoError(t, store.Clear(ctx))
+}
+
+// testStoreUpdateTrigger exercises the UpdateTrigger operation of the store directly.
+func testStoreUpdateTrigger(t *testing.T, store scheduler.Store) {
+	ctx := t.Context()
+	require.NoError(t, store.Clear(ctx))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	err := store.Create(ctx, &scheduler.Task{Slug: "first", When: now.Add(time.Minute), Trigger: "@every 1m", Payload: []byte("p")})
+	require.NoError(t, err)
+	err = store.Create(ctx, &scheduler.Task{Slug: "second", When: now.Add(time.Hour), Trigger: "@every 1h"})
+	require.NoError(t, err)
+
+	// moving the run time changes the order of the queue
+	when := now.Add(time.Second)
+	require.NoError(t, store.UpdateTrigger(ctx, "second", "@every 1s", when))
+
+	next, err := store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "second", next.Slug)
+	require.Equal(t, when, next.When)
+
+	st, err := store.Get(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, "@every 1s", st.Trigger)
+	require.Equal(t, when, st.When)
+	require.False(t, st.Suspended)
+
+	// the other fields are left untouched
+	require.NoError(t, store.UpdateTrigger(ctx, "first", "@every 2m", now.Add(2*time.Minute)))
+	st, err = store.Get(ctx, "first")
+	require.NoError(t, err)
+	require.Equal(t, "@every 2m", st.Trigger)
+	require.Equal(t, now.Add(2*time.Minute), st.When)
+	require.Equal(t, "p", string(st.Payload))
+
+	// a suspended task keeps its suspension
+	require.NoError(t, store.Suspend(ctx, "first"))
+	require.NoError(t, store.UpdateTrigger(ctx, "first", "@every 3m", now.Add(3*time.Minute)))
+	st, err = store.Get(ctx, "first")
+	require.NoError(t, err)
+	require.True(t, st.Suspended)
+	require.Equal(t, "@every 3m", st.Trigger)
+	next, err = store.NextRun(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "second", next.Slug)
+
+	// a locked (running) task can have its trigger changed; the lock is kept and the change survives the reschedule
+	locked, err := store.Lock(ctx, next)
+	require.NoError(t, err)
+	require.NoError(t, store.UpdateTrigger(ctx, "second", "@every 5s", when.Add(5*time.Second)))
+	_, err = store.NextRun(ctx)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
+	locked.Payload = []byte("ran")
+	locked.When = when.Add(time.Second)
+	require.NoError(t, store.Reschedule(ctx, locked))
+	st, err = store.Get(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, "@every 5s", st.Trigger)
+	require.Equal(t, "ran", string(st.Payload))
+	require.Equal(t, when.Add(time.Second), st.When)
+
+	require.ErrorIs(t, store.UpdateTrigger(ctx, "unknown", "@every 1s", when), scheduler.ErrTaskNotFound)
+
+	require.NoError(t, store.Clear(ctx))
+}
+
+// DummyExecuter implements the scheduler.Executer interface.
+type DummyExecuter struct {
 	kind string
 	err  error
 }
 
-func (pj DummyJob) Kind() string {
+func (pj DummyExecuter) Kind() string {
 	return pj.kind
 }
 
-// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-func (pj DummyJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+// Execute Called by the Scheduler when a Trigger fires that is associated with the Executer.
+func (pj DummyExecuter) Execute(_ context.Context, st *scheduler.Task) (*scheduler.Task, error) {
 	if pj.err != nil {
 		return nil, pj.err
 	}

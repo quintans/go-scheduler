@@ -25,8 +25,16 @@ func TestPgStore(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	store := postgres.New(db.DB)
+	require.NoError(t, store.CreateSchema(t.Context()))
+	require.NoError(t, store.CreateSchema(t.Context()), "creating the schema twice is fine")
 	t.Run("postgres", func(t *testing.T) {
 		testScheduler(t, store)
+	})
+	t.Run("postgres suspend", func(t *testing.T) {
+		testStoreSuspend(t, store)
+	})
+	t.Run("postgres update trigger", func(t *testing.T) {
+		testStoreUpdateTrigger(t, store)
 	})
 }
 
@@ -86,32 +94,7 @@ func pgSetup() (PgConfig, func(), error) {
 	dbConfig.Host = ip
 	dbConfig.Port = port.Int()
 
-	db, err := pgConnect(dbConfig)
-	if err != nil {
-		tearDown()
-		return PgConfig{}, nil, fmt.Errorf("failed to connect: %w", err)
-	}
-	defer db.Close()
-
-	dbSchema(db)
-
 	return dbConfig, tearDown, nil
-}
-
-func dbSchema(db *sqlx.DB) {
-	db.MustExec(`
-	CREATE TABLE IF NOT EXISTS schedules(
-		slug VARCHAR (100) PRIMARY KEY,
-		payload bytea,
-		run_at TIMESTAMP NOT NULL,
-		version INTEGER NOT NULL,
-		retry INTEGER NOT NULL,
-		result TEXT,
-		trigger_expr TEXT,
-		locked_until TIMESTAMP
-	);
-	CREATE INDEX sch_run_at_lock_idx ON schedules (run_at, locked_until);
-	`)
 }
 
 func pgConnect(dbConfig PgConfig) (*sqlx.DB, error) {

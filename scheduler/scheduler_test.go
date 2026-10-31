@@ -25,7 +25,7 @@ func TestScheduler(t *testing.T) {
 
 		// ALL jobs need to be registered before starting the scheduler
 		// otherwise they will not be picked up by any of the concurrent processes
-		printJob := &DummyJob{}
+		printJob := &DummyExecuter{}
 		// on demand job, not required to run on startup, therefore not scheduled,
 		// but still needs to be registered
 		err := sched.RegisterOneOffJob("ad-hoc", printJob)
@@ -101,18 +101,18 @@ func TestConcurrentScheduling(t *testing.T) {
 	sched1 := scheduler.NewScheduler(store)
 	sched2 := scheduler.NewScheduler(store)
 
-	printJob := &DummyJob{}
+	printJob := &DummyExecuter{}
 	err := sched1.ScheduleJob(t.Context(), "print", printJob, trigger.NewSimpleTrigger(time.Millisecond*500))
 	require.NoError(t, err)
 	err = sched2.ScheduleJob(t.Context(), "print", printJob, trigger.NewSimpleTrigger(time.Millisecond*500))
 	require.NoError(t, err)
 }
 
-// DummyJob implements the scheduler.Job interface.
-type DummyJob struct{}
+// DummyExecuter implements the scheduler.Executer interface.
+type DummyExecuter struct{}
 
-// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-func (pj DummyJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+// Execute Called by the Scheduler when a Trigger fires that is associated with the Executer.
+func (pj DummyExecuter) Execute(_ context.Context, st *scheduler.Task) (*scheduler.Task, error) {
 	splits := strings.Split(string(st.Payload), "#")
 	if len(splits) == 1 {
 		st.Payload = fmt.Appendf(nil, "%s#1", st.Payload)
@@ -135,9 +135,9 @@ func TestLoadScheduleJob(t *testing.T) {
 			store := memory.New()
 			sched := scheduler.NewScheduler(store)
 
-			// simulate a task previously persisted (possibly edited) in the store
+			// simulate a job previously persisted (possibly edited) in the store
 			firstRun := time.Now().Add(time.Second)
-			err := store.Create(ctx, &scheduler.StoreTask{
+			err := store.Create(ctx, &scheduler.Task{
 				Slug:    "load-job",
 				Payload: []byte("Loaded"),
 				When:    firstRun,
@@ -145,10 +145,10 @@ func TestLoadScheduleJob(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			err = sched.LoadScheduleJob(ctx, "load-job", &DummyJob{}, trigger.NewSimpleTrigger(time.Hour))
+			err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour))
 			require.NoError(t, err)
 
-			// the stored task is kept untouched
+			// the stored job is kept untouched
 			st, err := store.Get(ctx, "load-job")
 			require.NoError(t, err)
 			assert.Equal(t, "@every 2s", st.Trigger)
@@ -173,7 +173,7 @@ func TestLoadScheduleJob(t *testing.T) {
 			sched := scheduler.NewScheduler(store)
 
 			firstRun := time.Now().Add(time.Second)
-			err := sched.LoadScheduleJob(ctx, "load-job", &DummyJob{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
+			err := sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
 			// let the execution loop park on the first run timer before editing the store
@@ -208,7 +208,7 @@ func TestLoadScheduleJob(t *testing.T) {
 			sched := scheduler.NewScheduler(store)
 
 			firstRun := time.Now().Add(time.Second)
-			err := sched.ScheduleJob(ctx, "code-job", &DummyJob{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
+			err := sched.ScheduleJob(ctx, "code-job", &DummyExecuter{}, trigger.NewSimpleTrigger(2*time.Second), scheduler.WithWhen(firstRun))
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
 			// let the execution loop park on the first run timer before editing the store
@@ -232,7 +232,7 @@ func TestLoadScheduleJob(t *testing.T) {
 		cronTrigger, err := trigger.NewCronTrigger("0 0 * * * *")
 		require.NoError(t, err)
 		when := time.Now().Add(time.Hour)
-		err = sched.LoadScheduleJob(ctx, "load-job", &DummyJob{}, cronTrigger, scheduler.WithWhen(when))
+		err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, cronTrigger, scheduler.WithWhen(when))
 		require.NoError(t, err)
 
 		st, err := store.Get(ctx, "load-job")
@@ -241,17 +241,17 @@ func TestLoadScheduleJob(t *testing.T) {
 		assert.Equal(t, when, st.When)
 	})
 
-	t.Run("falls back to the default trigger when the stored task has no trigger", func(t *testing.T) {
+	t.Run("falls back to the default trigger when the stored job has no trigger", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			ctx := t.Context()
 			store := memory.New()
 			sched := scheduler.NewScheduler(store)
 
 			firstRun := time.Now().Add(time.Second)
-			err := store.Create(ctx, &scheduler.StoreTask{Slug: "load-job", When: firstRun})
+			err := store.Create(ctx, &scheduler.Task{Slug: "load-job", When: firstRun})
 			require.NoError(t, err)
 
-			err = sched.LoadScheduleJob(ctx, "load-job", &DummyJob{}, trigger.NewSimpleTrigger(3*time.Second))
+			err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(3*time.Second))
 			require.NoError(t, err)
 
 			sched.Start(ctx, 1)
@@ -268,10 +268,10 @@ func TestLoadScheduleJob(t *testing.T) {
 		store := memory.New()
 		sched := scheduler.NewScheduler(store)
 
-		err := store.Create(ctx, &scheduler.StoreTask{Slug: "load-job", When: time.Now(), Trigger: "not a cron"})
+		err := store.Create(ctx, &scheduler.Task{Slug: "load-job", When: time.Now(), Trigger: "not a cron"})
 		require.NoError(t, err)
 
-		err = sched.LoadScheduleJob(ctx, "load-job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second))
+		err = sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
 		require.Error(t, err)
 	})
 
@@ -281,16 +281,16 @@ func TestLoadScheduleJob(t *testing.T) {
 		sched := scheduler.NewScheduler(memory.New())
 		sched.Start(ctx, 1)
 
-		err := sched.LoadScheduleJob(ctx, "load-job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second))
+		err := sched.LoadScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
 		require.Error(t, err)
 	})
 }
 
 // editStoredTrigger simulates editing the trigger expression directly in the store,
 // without touching the entry shared with the scheduler.
-// The memory store has no in-place update, so the task is recreated; callers must make sure
+// The memory store has no in-place update, so the job is recreated; callers must make sure
 // the scheduler is parked on a timer (synctest.Wait) so it does not observe the empty queue in between.
-func editStoredTrigger(t *testing.T, store scheduler.JobStore, slug, expr string) {
+func editStoredTrigger(t *testing.T, store scheduler.Store, slug, expr string) {
 	t.Helper()
 	ctx := t.Context()
 
@@ -311,7 +311,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			sched := scheduler.NewScheduler(store)
 
 			firstRun := time.Now().Add(time.Second)
-			err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second),
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second),
 				scheduler.WithWhen(firstRun), scheduler.WithPayload([]byte("Job")))
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
@@ -366,7 +366,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			sched := scheduler.NewScheduler(store)
 
 			firstRun := time.Now().Add(10 * time.Second)
-			err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second), scheduler.WithWhen(firstRun))
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second), scheduler.WithWhen(firstRun))
 			require.NoError(t, err)
 
 			require.NoError(t, sched.SuspendJob(ctx, "job"))
@@ -386,7 +386,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			store := memory.New()
 			sched := scheduler.NewScheduler(store)
 
-			require.NoError(t, sched.RegisterOneOffJob("ad-hoc", &DummyJob{}))
+			require.NoError(t, sched.RegisterOneOffJob("ad-hoc", &DummyExecuter{}))
 			sched.Start(ctx, 1)
 
 			due := time.Now().Add(time.Second)
@@ -411,7 +411,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			// it runs immediately, and being a one-off job without trigger it is then removed
 			synctest.Wait()
 			_, err = store.Get(ctx, slug)
-			require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+			require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
 		})
 	})
 
@@ -423,7 +423,7 @@ func TestSuspendResumeJob(t *testing.T) {
 
 			started := make(chan struct{})
 			release := make(chan struct{})
-			job := scheduler.JobFn(func(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+			executer := scheduler.ExecuterFn(func(_ context.Context, st *scheduler.Task) (*scheduler.Task, error) {
 				close(started)
 				<-release
 				st.Payload = []byte("done")
@@ -431,7 +431,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			})
 
 			firstRun := time.Now().Add(time.Second)
-			err := sched.ScheduleJob(ctx, "slow", job, trigger.NewSimpleTrigger(time.Second), scheduler.WithWhen(firstRun))
+			err := sched.ScheduleJob(ctx, "slow", executer, trigger.NewSimpleTrigger(time.Second), scheduler.WithWhen(firstRun))
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
 
@@ -440,7 +440,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			close(release)
 			synctest.Wait()
 
-			// the result of the run is kept and the task is rescheduled, but as suspended
+			// the result of the run is kept and the job is rescheduled, but as suspended
 			st, err := store.Get(ctx, "slow")
 			require.NoError(t, err)
 			assert.Equal(t, "done", string(st.Payload))
@@ -463,7 +463,7 @@ func TestSuspendResumeJob(t *testing.T) {
 
 			start := time.Now()
 			firstRun := start.Add(time.Second)
-			err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second),
+			err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second),
 				scheduler.WithWhen(firstRun), scheduler.WithPayload([]byte("Job")))
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
@@ -477,7 +477,7 @@ func TestSuspendResumeJob(t *testing.T) {
 			st, err := store.Get(ctx, "job")
 			require.NoError(t, err)
 			assert.True(t, st.Suspended)
-			assert.Equal(t, "Job", string(st.Payload), "the worker must not run the task it was parked on")
+			assert.Equal(t, "Job", string(st.Payload), "the worker must not run the job it was parked on")
 
 			// resumed behind the scheduler's back, due in the future
 			resumeAt := time.Now().Add(3 * time.Second)
@@ -498,13 +498,13 @@ func TestSuspendResumeJob(t *testing.T) {
 		store := memory.New()
 
 		sched := scheduler.NewScheduler(store)
-		err := sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second))
+		err := sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
 		require.NoError(t, err)
 		require.NoError(t, sched.SuspendJob(ctx, "job"))
 
 		// a new scheduler instance (or the same one after a restart) schedules the job again
 		sched = scheduler.NewScheduler(store)
-		err = sched.ScheduleJob(ctx, "job", &DummyJob{}, trigger.NewSimpleTrigger(time.Second))
+		err = sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
 		require.NoError(t, err)
 
 		sj, err := sched.GetScheduledJob(ctx, "job")
@@ -516,14 +516,14 @@ func TestSuspendResumeJob(t *testing.T) {
 		ctx := t.Context()
 		sched := scheduler.NewScheduler(memory.New())
 
-		require.ErrorIs(t, sched.SuspendJob(ctx, "unknown"), scheduler.ErrJobNotFound)
-		require.ErrorIs(t, sched.ResumeJob(ctx, "unknown"), scheduler.ErrJobNotFound)
+		require.ErrorIs(t, sched.SuspendJob(ctx, "unknown"), scheduler.ErrTaskNotFound)
+		require.ErrorIs(t, sched.ResumeJob(ctx, "unknown"), scheduler.ErrTaskNotFound)
 	})
 }
 
 func TestExecutionLoopStopsOnCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := &failingStore{JobStore: memory.New()}
+		store := &failingStore{Store: memory.New()}
 		sched := scheduler.NewScheduler(store)
 
 		ctx, cancel := context.WithCancel(t.Context())
@@ -542,12 +542,12 @@ func TestExecutionLoopStopsOnCancel(t *testing.T) {
 	})
 }
 
-func TestUnregisteredOneOffTaskIsRemoved(t *testing.T) {
+func TestUnregisteredOneOffJobIsRemoved(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := t.Context()
 		store := memory.New()
-		// a one-off task stored by another replica, whose job is not registered here
-		err := store.Create(ctx, &scheduler.StoreTask{Slug: "unknown:1", When: time.Now().Add(time.Second)})
+		// a one-off job stored by another replica, whose job is not registered here
+		err := store.Create(ctx, &scheduler.Task{Slug: "unknown:1", When: time.Now().Add(time.Second)})
 		require.NoError(t, err)
 
 		sched := scheduler.NewScheduler(store)
@@ -555,18 +555,18 @@ func TestUnregisteredOneOffTaskIsRemoved(t *testing.T) {
 		time.Sleep(1500 * time.Millisecond)
 
 		_, err = store.Get(ctx, "unknown:1")
-		require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+		require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
 	})
 }
 
 // failingStore fails every NextRun and counts the calls.
 type failingStore struct {
-	scheduler.JobStore
+	scheduler.Store
 	mu sync.Mutex
 	n  int
 }
 
-func (f *failingStore) NextRun(context.Context) (*scheduler.StoreTask, error) {
+func (f *failingStore) NextRun(context.Context) (*scheduler.Task, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.n++

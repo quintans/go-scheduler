@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testScheduler(t *testing.T, store scheduler.JobStore) {
+func testScheduler(t *testing.T, store scheduler.Store) {
 	sched := scheduler.NewScheduler(
 		store,
 		scheduler.HeartbeatOption(time.Second),
@@ -22,19 +22,19 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 
 	backoff := trigger.NewExponentialBackoff(trigger.StdSchedulerIncBackoffOption(100 * time.Millisecond))
 
-	goodJob := &DummyJob{kind: "curl-good", err: nil}
-	badJob := &DummyJob{kind: "curl-bad", err: errors.New("curl error")}
+	goodExecuter := &DummyExecuter{kind: "curl-good", err: nil}
+	badExecuter := &DummyExecuter{kind: "curl-bad", err: errors.New("curl error")}
 
 	ctx := t.Context()
 	// for static (repeating) jobs,  we provide a trigger. We usually don't provide payload
-	err := sched.ScheduleJob(ctx, "good-job", goodJob, trigger.NewSimpleTrigger(time.Millisecond*700))
+	err := sched.ScheduleJob(ctx, "good-job", goodExecuter, trigger.NewSimpleTrigger(time.Millisecond*700))
 	require.NoError(t, err)
-	err = sched.ScheduleJob(ctx, "bad-job", badJob, trigger.NewSimpleTrigger(time.Millisecond*800), scheduler.WithBackoff(backoff))
+	err = sched.ScheduleJob(ctx, "bad-job", badExecuter, trigger.NewSimpleTrigger(time.Millisecond*800), scheduler.WithBackoff(backoff))
 	require.NoError(t, err)
 	// one off
-	err = sched.RegisterOneOffJob("good-job-oo", goodJob)
+	err = sched.RegisterOneOffJob("good-job-oo", goodExecuter)
 	require.NoError(t, err)
-	err = sched.RegisterOneOffJob("bad-job-oo", badJob)
+	err = sched.RegisterOneOffJob("bad-job-oo", badExecuter)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,7 +64,7 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 	err = sched.DeleteJob(ctx, "good-job")
 	require.NoError(t, err)
 	_, err = store.Get(ctx, "good-job")
-	require.True(t, errors.Is(err, scheduler.ErrJobNotFound))
+	require.True(t, errors.Is(err, scheduler.ErrTaskNotFound))
 
 	scheduledJobKeys, err = sched.GetJobSlugs(ctx)
 	require.NoError(t, err)
@@ -83,17 +83,17 @@ func testScheduler(t *testing.T, store scheduler.JobStore) {
 }
 
 // testStoreSuspend exercises the Suspend/Resume operations of the store directly.
-func testStoreSuspend(t *testing.T, store scheduler.JobStore) {
+func testStoreSuspend(t *testing.T, store scheduler.Store) {
 	ctx := t.Context()
 	require.NoError(t, store.Clear(ctx))
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	err := store.Create(ctx, &scheduler.StoreTask{Slug: "paused", When: now.Add(-time.Second), Trigger: "@every 1s"})
+	err := store.Create(ctx, &scheduler.Task{Slug: "paused", When: now.Add(-time.Second), Trigger: "@every 1s"})
 	require.NoError(t, err)
-	err = store.Create(ctx, &scheduler.StoreTask{Slug: "later", When: now.Add(time.Hour)})
+	err = store.Create(ctx, &scheduler.Task{Slug: "later", When: now.Add(time.Hour)})
 	require.NoError(t, err)
 
-	// the earliest task is the next to run
+	// the earliest job is the next to run
 	next, err := store.NextRun(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "paused", next.Slug)
@@ -106,7 +106,7 @@ func testStoreSuspend(t *testing.T, store scheduler.JobStore) {
 	require.True(t, st.Suspended)
 	require.Equal(t, "@every 1s", st.Trigger)
 
-	// a suspended task is skipped, even if it is due
+	// a suspended job is skipped, even if it is due
 	next, err = store.NextRun(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "later", next.Slug)
@@ -114,12 +114,12 @@ func testStoreSuspend(t *testing.T, store scheduler.JobStore) {
 
 	// and cannot be locked
 	_, err = store.Lock(ctx, st)
-	require.ErrorIs(t, err, scheduler.ErrJobNotLocked)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotLocked)
 
-	// when it is the only task, there is nothing to run
+	// when it is the only job, there is nothing to run
 	require.NoError(t, store.Delete(ctx, "later"))
 	_, err = store.NextRun(ctx)
-	require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
 
 	when := now.Add(time.Minute)
 	require.NoError(t, store.Resume(ctx, "paused", when))
@@ -135,13 +135,13 @@ func testStoreSuspend(t *testing.T, store scheduler.JobStore) {
 	require.Equal(t, when, st.When)
 	require.Equal(t, "@every 1s", st.Trigger)
 
-	// a locked (running) task can be suspended; the lock is kept
+	// a locked (running) job can be suspended; the lock is kept
 	locked, err := store.Lock(ctx, next)
 	require.NoError(t, err)
 	require.NoError(t, store.Suspend(ctx, "paused"))
 	_, err = store.NextRun(ctx)
-	require.ErrorIs(t, err, scheduler.ErrJobNotFound)
-	// once rescheduled at the end of the run, the task keeps the run result but stays suspended
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
+	// once rescheduled at the end of the run, the job keeps the run result but stays suspended
 	locked.Payload = []byte("ran")
 	locked.When = when.Add(time.Minute)
 	require.NoError(t, store.Reschedule(ctx, locked))
@@ -151,26 +151,26 @@ func testStoreSuspend(t *testing.T, store scheduler.JobStore) {
 	require.Equal(t, "ran", string(st.Payload))
 	require.Equal(t, when.Add(time.Minute), st.When)
 	_, err = store.NextRun(ctx)
-	require.ErrorIs(t, err, scheduler.ErrJobNotFound)
+	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
 
-	require.ErrorIs(t, store.Suspend(ctx, "unknown"), scheduler.ErrJobNotFound)
-	require.ErrorIs(t, store.Resume(ctx, "unknown", when), scheduler.ErrJobNotFound)
+	require.ErrorIs(t, store.Suspend(ctx, "unknown"), scheduler.ErrTaskNotFound)
+	require.ErrorIs(t, store.Resume(ctx, "unknown", when), scheduler.ErrTaskNotFound)
 
 	require.NoError(t, store.Clear(ctx))
 }
 
-// DummyJob implements the scheduler.Job interface.
-type DummyJob struct {
+// DummyExecuter implements the scheduler.Executer interface.
+type DummyExecuter struct {
 	kind string
 	err  error
 }
 
-func (pj DummyJob) Kind() string {
+func (pj DummyExecuter) Kind() string {
 	return pj.kind
 }
 
-// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-func (pj DummyJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+// Execute Called by the Scheduler when a Trigger fires that is associated with the Executer.
+func (pj DummyExecuter) Execute(_ context.Context, st *scheduler.Task) (*scheduler.Task, error) {
 	if pj.err != nil {
 		return nil, pj.err
 	}

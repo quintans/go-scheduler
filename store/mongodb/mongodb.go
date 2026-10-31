@@ -19,7 +19,7 @@ const (
 )
 
 // Entry is the document persisted in the MongoDB collection.
-// The task slug is used as the document id, which makes it unique.
+// The job slug is used as the document id, which makes it unique.
 type Entry struct {
 	Slug        string     `bson:"_id"`
 	Payload     []byte     `bson:"payload,omitempty"`
@@ -32,7 +32,7 @@ type Entry struct {
 	LockedUntil *time.Time `bson:"locked_until"`
 }
 
-func toEntry(t *scheduler.StoreTask) *Entry {
+func toEntry(t *scheduler.Task) *Entry {
 	return &Entry{
 		Slug:      t.Slug,
 		Payload:   t.Payload,
@@ -45,11 +45,11 @@ func toEntry(t *scheduler.StoreTask) *Entry {
 	}
 }
 
-func fromEntry(e *Entry) *scheduler.StoreTask {
+func fromEntry(e *Entry) *scheduler.Task {
 	if e == nil {
 		return nil
 	}
-	return &scheduler.StoreTask{
+	return &scheduler.Task{
 		Slug:      e.Slug,
 		Payload:   e.Payload,
 		When:      e.When.UTC(),
@@ -63,7 +63,7 @@ func fromEntry(e *Entry) *scheduler.StoreTask {
 
 type StoreOption func(*Store)
 
-// CollectionOption sets the name of the collection where the tasks are stored.
+// CollectionOption sets the name of the collection where the jobs are stored.
 // Defaults to "schedules".
 func CollectionOption(collectionName string) StoreOption {
 	return func(s *Store) {
@@ -71,8 +71,8 @@ func CollectionOption(collectionName string) StoreOption {
 	}
 }
 
-// LockDurationOption sets for how long a task stays locked after being acquired.
-// After this period the task is considered abandoned and can be locked by another process.
+// LockDurationOption sets for how long a job stays locked after being acquired.
+// After this period the job is considered abandoned and can be locked by another process.
 // Defaults to 5 minutes.
 func LockDurationOption(d time.Duration) StoreOption {
 	return func(s *Store) {
@@ -108,7 +108,7 @@ func (s *Store) collection() *mongo.Collection {
 	return s.db.Collection(s.collectionName)
 }
 
-// CreateSchema creates the collection and the index used by NextRun to find the next task to run.
+// CreateSchema creates the collection and the index used by NextRun to find the next job to run.
 // It is safe to call it multiple times.
 func (s *Store) CreateSchema(ctx context.Context) error {
 	err := s.db.CreateCollection(ctx, s.collectionName)
@@ -129,22 +129,22 @@ func (s *Store) CreateSchema(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toEntry(task)
+func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
+	entry := toEntry(job)
 	_, err := s.collection().InsertOne(ctx, entry)
 	if err == nil {
 		return nil
 	}
 
 	if mongo.IsDuplicateKeyError(err) {
-		return scheduler.ErrJobAlreadyExists
+		return scheduler.ErrTaskAlreadyExists
 	}
 
-	return fmt.Errorf("failed to schedule '%s': %w", task.Slug, err)
+	return fmt.Errorf("failed to schedule '%s': %w", job.Slug, err)
 }
 
 // NextRun returns the next available run
-func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
+func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 	entry := &Entry{}
 	err := s.collection().FindOne(
@@ -153,7 +153,7 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 		options.FindOne().SetSort(bson.D{{Key: "run_at", Value: 1}}),
 	).Decode(entry)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, scheduler.ErrJobNotFound
+		return nil, scheduler.ErrTaskNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed selecting next run: %w", err)
@@ -162,12 +162,12 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	return fromEntry(entry), nil
 }
 
-func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+func (s *Store) Lock(ctx context.Context, job *scheduler.Task) (*scheduler.Task, error) {
 	lockUntil := time.Now().UTC().Add(s.lockDuration)
 	entry := &Entry{}
 	err := s.collection().FindOneAndUpdate(
 		ctx,
-		bson.D{{Key: "_id", Value: task.Slug}, {Key: "version", Value: task.Version}, notSuspended},
+		bson.D{{Key: "_id", Value: job.Slug}, {Key: "version", Value: job.Version}, notSuspended},
 		bson.D{
 			{Key: "$set", Value: bson.D{{Key: "locked_until", Value: lockUntil}}},
 			{Key: "$inc", Value: bson.D{{Key: "version", Value: 1}}},
@@ -175,17 +175,17 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	).Decode(entry)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, scheduler.ErrJobNotLocked
+		return nil, scheduler.ErrTaskNotLocked
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to lock '%s': %w", task.Slug, err)
+		return nil, fmt.Errorf("failed to lock '%s': %w", job.Slug, err)
 	}
 
 	return fromEntry(entry), nil
 }
 
-func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toEntry(task)
+func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
+	entry := toEntry(job)
 	// the trigger expression is owned by the store and may have been edited there, so it is not updated
 	res, err := s.collection().UpdateOne(
 		ctx,
@@ -202,10 +202,10 @@ func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to reschedule task '%s': %w", task.Slug, err)
+		return fmt.Errorf("failed to reschedule task '%s': %w", job.Slug, err)
 	}
 	if res.MatchedCount == 0 {
-		return fmt.Errorf("failed to reschedule task '%s': no update: %w", task.Slug, scheduler.ErrJobNotFound)
+		return fmt.Errorf("failed to reschedule task '%s': no update: %w", job.Slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil
@@ -229,7 +229,7 @@ func (s *Store) updateSuspended(ctx context.Context, action string, slug string,
 		return fmt.Errorf("failed to %s '%s': %w", action, slug, err)
 	}
 	if res.MatchedCount == 0 {
-		return fmt.Errorf("%s task '%s': %w", action, slug, scheduler.ErrJobNotFound)
+		return fmt.Errorf("%s task '%s': %w", action, slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil
@@ -263,11 +263,11 @@ func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 	return slugs, nil
 }
 
-func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
+func (s *Store) Get(ctx context.Context, slug string) (*scheduler.Task, error) {
 	entry := &Entry{}
 	err := s.collection().FindOne(ctx, bson.D{{Key: "_id", Value: slug}}).Decode(entry)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, fmt.Errorf("get task '%s': %w", slug, scheduler.ErrJobNotFound)
+		return nil, fmt.Errorf("get task '%s': %w", slug, scheduler.ErrTaskNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get task '%s': %w", slug, err)
@@ -282,7 +282,7 @@ func (s *Store) Delete(ctx context.Context, slug string) error {
 		return fmt.Errorf("failed to delete '%s': %w", slug, err)
 	}
 	if res.DeletedCount == 0 {
-		return fmt.Errorf("delete task '%s': %w", slug, scheduler.ErrJobNotFound)
+		return fmt.Errorf("delete task '%s': %w", slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil
@@ -303,10 +303,10 @@ func isNamespaceExists(err error) bool {
 	return errors.As(err, &cmdErr) && cmdErr.Code == 48
 }
 
-// notSuspended matches the tasks that are not suspended. A missing "suspended" field is also matched.
+// notSuspended matches the jobs that are not suspended. A missing "suspended" field is also matched.
 var notSuspended = bson.E{Key: "suspended", Value: bson.D{{Key: "$ne", Value: true}}}
 
-// runnableFilter matches the tasks that are not suspended and are not locked, or whose lock has expired.
+// runnableFilter matches the jobs that are not suspended and are not locked, or whose lock has expired.
 // A missing "locked_until" field is also matched by the "null" comparison.
 func runnableFilter(now time.Time) bson.D {
 	return bson.D{

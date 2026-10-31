@@ -54,16 +54,16 @@ func main() {
 
 ### Core Interfaces
 
-#### Job Interface
+#### Executer Interface
 
-The Job interface is responsible for executing the actual work:
+The Executer interface is responsible for executing the actual work:
 
 ```go
-type Job interface {
-    // Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-    // If a nil StoreTask is returned, it will be removed from the scheduler.
+type Executer interface {
+    // Execute Called by the Scheduler when a Trigger fires that is associated with the Executer.
+    // If a nil Task is returned, it will be removed from the scheduler.
     // If an error is returned it will be rescheduled with a backoff.
-    Execute(context.Context, *StoreTask) (*StoreTask, error)
+    Execute(context.Context, *Task) (*Task, error)
 }
 ```
 
@@ -79,24 +79,24 @@ type Trigger interface {
 }
 ```
 
-#### JobStore Interface
+#### Store Interface
 
-The JobStore interface defines where and how job tasks are persisted:
+The Store interface defines where and how tasks (the persisted state of scheduled jobs) are persisted:
 
 ```go
-// JobStore represents persistent storage for scheduled jobs.
-type JobStore interface {
+// Store represents persistent storage for the tasks to be executed.
+type Store interface {
 	// Create schedules a new task.
-	Create(context.Context, *StoreTask) error
+	Create(context.Context, *Task) error
 	
 	// NextRun finds the next task scheduled to run.
-	NextRun(context.Context) (*StoreTask, error)
+	NextRun(context.Context) (*Task, error)
 	
 	// Lock finds and locks the next task to be executed.
-	Lock(context.Context, *StoreTask) (*StoreTask, error)
+	Lock(context.Context, *Task) (*Task, error)
 	
-	// Reschedule releases the lock and updates task data for the next run.
-	Reschedule(context.Context, *StoreTask) error
+	// Reschedule releases the lock and updates the task data for the next run.
+	Reschedule(context.Context, *Task) error
 	
 	// Suspend marks the task as suspended: it is skipped by NextRun and cannot be locked until resumed.
 	Suspend(ctx context.Context, slug string) error
@@ -104,16 +104,16 @@ type JobStore interface {
 	// Resume clears the suspension and sets the next run time of the task.
 	Resume(ctx context.Context, slug string, when time.Time) error
 	
-	// GetSlugs returns all job identifiers.
+	// GetSlugs returns the slugs of all the tasks.
 	GetSlugs(context.Context) ([]string, error)
 	
-	// Get retrieves a stored task by its identifier.
-	Get(ctx context.Context, slug string) (*StoreTask, error)
+	// Get retrieves a task by its slug.
+	Get(ctx context.Context, slug string) (*Task, error)
 	
-	// Delete removes a stored task.
+	// Delete removes a task.
 	Delete(ctx context.Context, slug string) error
 	
-	// Clear removes all stored tasks.
+	// Clear removes all the tasks.
 	Clear(context.Context) error
 }
 ```
@@ -159,11 +159,11 @@ CREATE INDEX IF NOT EXISTS schedules_run_at_lock_idx ON schedules (run_at, locke
 Consider the job:
 
 ```go
-// PrintJob implements the scheduler.Job interface.
-type PrintJob struct {}
+// PrintExecuter implements the scheduler.Executer interface.
+type PrintExecuter struct {}
 
-// Execute Called by the Scheduler when a Trigger fires that is associated with the Job.
-func (PrintJob) Execute(_ context.Context, st *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+// Execute Called by the Scheduler when a Trigger fires that is associated with the Executer.
+func (PrintExecuter) Execute(_ context.Context, st *scheduler.Task) (*scheduler.Task, error) {
 	fmt.Println(string(st.Payload))
 	return st, nil
 }
@@ -178,7 +178,7 @@ sched := scheduler.NewScheduler(store)
 
 // Create a cron trigger that fires every 5 seconds
 cronTrigger, _ := trigger.NewCronTrigger("1/5 * * * * *")
-pj := &PrintJob{}
+pj := &PrintExecuter{}
 
 // If this job is already scheduled by another process, it will be ignored
 sched.ScheduleJob(ctx, "print-job", pj, cronTrigger)
@@ -188,7 +188,7 @@ sched.Start(ctx, 1)
 
 ### Loading the Trigger from the Store
 
-When a job is scheduled, its trigger expression is persisted alongside the task (cron expressions as given, simple triggers as `@every <duration>`).
+When a job is scheduled, its trigger expression is persisted alongside the job (cron expressions as given, simple triggers as `@every <duration>`).
 `LoadScheduleJob` reads that expression back from the store and uses it to schedule the job, so the schedule can be changed directly in the store without a new deployment.
 The provided trigger is only used as a default when the job is not in the store yet (or was stored without a trigger).
 
@@ -203,7 +203,7 @@ sched := scheduler.NewScheduler(store)
 // Used only the first time, when nothing is stored for "print-job" yet.
 // On the next start-up the trigger stored for "print-job" takes precedence.
 defaultTrigger, _ := trigger.NewCronTrigger("@hourly")
-sched.LoadScheduleJob(ctx, "print-job", &PrintJob{}, defaultTrigger)
+sched.LoadScheduleJob(ctx, "print-job", &PrintExecuter{}, defaultTrigger)
 
 sched.Start(ctx, 1)
 ```
@@ -212,7 +212,7 @@ For the PostgreSQL store this requires a `trigger_expr TEXT` column in the sched
 
 ### Suspending Jobs
 
-A suspended job stays in the store but does not run until it is resumed. The suspension is persisted alongside the task, so it survives restarts and is honoured by every scheduler instance sharing the store.
+A suspended job stays in the store but does not run until it is resumed. The suspension is persisted alongside the job, so it survives restarts and is honoured by every scheduler instance sharing the store.
 
 ```go
 // no further runs of "print-job" until it is resumed; a run already in progress is not interrupted
@@ -239,14 +239,14 @@ ctx := context.Background()
 store := // ...
 sched := scheduler.NewScheduler(store)
 
-pj := &PrintJob{}
+pj := &PrintExecuter{}
 // Register for one-off execution
 sched.RegisterOneOffJob("print-job", pj) 
 
 sched.Start(ctx, 1)
 
 // Schedule a one-off job with a payload.
-// Each call creates a new task with a unique slug of the form "print-job:<uuid>",
+// Each call creates a new job with a unique slug of the form "print-job:<uuid>",
 // which is returned so that it can be suspended, resumed or deleted later.
 slug, err := sched.ScheduleOneOffJob(
     ctx, 

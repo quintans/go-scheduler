@@ -34,7 +34,7 @@ type Entry struct {
 	Suspended bool      `db:"suspended"`
 }
 
-func toEntry(t *scheduler.StoreTask) *Entry {
+func toEntry(t *scheduler.Task) *Entry {
 	return &Entry{
 		Slug:      t.Slug,
 		Payload:   t.Payload,
@@ -47,11 +47,11 @@ func toEntry(t *scheduler.StoreTask) *Entry {
 	}
 }
 
-func fromEntry(e *Entry) *scheduler.StoreTask {
+func fromEntry(e *Entry) *scheduler.Task {
 	if e == nil {
 		return nil
 	}
-	return &scheduler.StoreTask{
+	return &scheduler.Task{
 		Slug:      e.Slug,
 		Payload:   e.Payload,
 		When:      e.When.UTC(),
@@ -125,8 +125,8 @@ func (s *Store) CreateSchema(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toEntry(task)
+func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
+	entry := toEntry(job)
 	_, err := s.db.NamedExecContext(
 		ctx,
 		fmt.Sprintf(`INSERT INTO %s (slug, payload, run_at, version, retry, result, trigger_expr, suspended, locked_until)
@@ -138,14 +138,14 @@ func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
 	}
 
 	if isDup(err) {
-		return scheduler.ErrJobAlreadyExists
+		return scheduler.ErrTaskAlreadyExists
 	}
 
-	return fmt.Errorf("failed to schedule task: %w", err)
+	return fmt.Errorf("failed to schedule job: %w", err)
 }
 
 // NextRun returns the next available run
-func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
+func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 	entry := &Entry{}
 	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT %s FROM %s
@@ -155,7 +155,7 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 		selectColumns, s.tableName), now)
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, scheduler.ErrJobNotFound
+		return nil, scheduler.ErrTaskNotFound
 	}
 
 	if err != nil {
@@ -165,11 +165,11 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	return fromEntry(entry), nil
 }
 
-func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
-	var entry *scheduler.StoreTask
+func (s *Store) Lock(ctx context.Context, job *scheduler.Task) (*scheduler.Task, error) {
+	var entry *scheduler.Task
 	err := s.withTx(ctx, func(c context.Context, t *sqlx.Tx) error {
 		var err error
-		entry, err = s.lock(c, t, task)
+		entry, err = s.lock(c, t, job)
 		return err
 	})
 	if err != nil {
@@ -178,43 +178,43 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 	return entry, nil
 }
 
-func (s *Store) lock(ctx context.Context, t *sqlx.Tx, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
+func (s *Store) lock(ctx context.Context, t *sqlx.Tx, job *scheduler.Task) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 	lockUntil := now.Add(s.lockDuration)
 	res, err := t.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s SET locked_until = $1, version = version + 1
 		WHERE slug = $2 AND version = $3 AND NOT suspended`, s.tableName),
-		lockUntil, task.Slug, task.Version)
+		lockUntil, job.Slug, job.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lock: %w", err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get affected rows when locking '%s': %w", task.Slug, err)
+		return nil, fmt.Errorf("failed to get affected rows when locking '%s': %w", job.Slug, err)
 	}
 	if affected == 0 {
-		return nil, scheduler.ErrJobNotLocked
+		return nil, scheduler.ErrTaskNotLocked
 	}
 
-	entry := *task // copy
+	entry := *job // copy
 	entry.Version++
 
 	return &entry, nil
 }
 
-func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toEntry(task)
+func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
+	entry := toEntry(job)
 	res, err := s.db.NamedExecContext(ctx,
 		fmt.Sprintf(`UPDATE %s
 		SET payload = :payload, run_at = :run_at, version = version + 1, retry = :retry, result = :result, locked_until = NULL
 		WHERE slug = :slug AND version = :version`, s.tableName),
 		entry)
 	if err != nil {
-		return fmt.Errorf("failed to reschedule %s: %w", task.Slug, err)
+		return fmt.Errorf("failed to reschedule %s: %w", job.Slug, err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("failed to reschedule %s: no update: %w", task.Slug, scheduler.ErrJobNotFound)
+		return fmt.Errorf("failed to reschedule %s: no update: %w", job.Slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil
@@ -238,7 +238,7 @@ func (s *Store) updateSuspended(ctx context.Context, query string, action string
 		return fmt.Errorf("failed to get affected rows when trying to %s '%s': %w", action, slug, err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("%s task '%s': %w", action, slug, scheduler.ErrJobNotFound)
+		return fmt.Errorf("%s task '%s': %w", action, slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil
@@ -252,13 +252,13 @@ func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("get slugs: %w", scheduler.ErrJobNotFound)
+		return nil, fmt.Errorf("get slugs: %w", scheduler.ErrTaskNotFound)
 	}
 
 	return nil, fmt.Errorf("failed to get slugs: %w", err)
 }
 
-func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
+func (s *Store) Get(ctx context.Context, slug string) (*scheduler.Task, error) {
 	entry := &Entry{}
 	err := s.db.GetContext(ctx, entry, fmt.Sprintf("SELECT %s FROM %s WHERE slug = $1", selectColumns, s.tableName), slug)
 	if err == nil {
@@ -266,7 +266,7 @@ func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, err
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("get task '%s': %w", slug, scheduler.ErrJobNotFound)
+		return nil, fmt.Errorf("get task '%s': %w", slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil, fmt.Errorf("get task '%s': %w", slug, err)
@@ -282,7 +282,7 @@ func (s *Store) Delete(ctx context.Context, slug string) error {
 		return fmt.Errorf("failed to get affected rows when deleting '%s': %w", slug, err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("delete task '%s': %w", slug, scheduler.ErrJobNotFound)
+		return fmt.Errorf("delete task '%s': %w", slug, scheduler.ErrTaskNotFound)
 	}
 
 	return nil

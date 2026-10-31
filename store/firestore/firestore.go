@@ -44,7 +44,7 @@ func (e *Entry) IsUnlocked(t time.Time) bool {
 	return e.LockedUntil.Before(t)
 }
 
-func toEntry(t *scheduler.StoreTask) *Entry {
+func toEntry(t *scheduler.Task) *Entry {
 	return &Entry{
 		Slug:      t.Slug,
 		Payload:   t.Payload,
@@ -57,11 +57,11 @@ func toEntry(t *scheduler.StoreTask) *Entry {
 	}
 }
 
-func fromEntry(e *Entry) *scheduler.StoreTask {
+func fromEntry(e *Entry) *scheduler.Task {
 	if e == nil {
 		return nil
 	}
-	return &scheduler.StoreTask{
+	return &scheduler.Task{
 		Slug:      e.Slug,
 		Payload:   e.Payload,
 		When:      e.When.UTC(),
@@ -118,20 +118,20 @@ func (s *Store) CreateSchema(context.Context) error {
 	return nil
 }
 
-func (s *Store) Create(ctx context.Context, task *scheduler.StoreTask) error {
-	entry := toEntry(task)
-	_, err := s.docRef(task.Slug).Create(ctx, entry)
+func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
+	entry := toEntry(job)
+	_, err := s.docRef(job.Slug).Create(ctx, entry)
 	if status.Code(err) == codes.AlreadyExists {
-		return scheduler.ErrJobAlreadyExists
+		return scheduler.ErrTaskAlreadyExists
 	}
 	if err != nil {
-		return fmt.Errorf("failed to schedule '%s': %w", task.Slug, err)
+		return fmt.Errorf("failed to schedule '%s': %w", job.Slug, err)
 	}
 
 	return nil
 }
 
-func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
+func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 
 	// ideally we would like to retrieve documents where "locked_until < now" and order ascending by "run_at"
@@ -147,7 +147,7 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	for {
 		doc, err := iter.Next()
 		if err == iterator.Done {
-			return nil, scheduler.ErrJobNotFound
+			return nil, scheduler.ErrTaskNotFound
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed selecting next run: %w", err)
@@ -163,12 +163,12 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.StoreTask, error) {
 	}
 }
 
-func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler.StoreTask, error) {
-	e, err := s.update(ctx, task.Slug, task.Version, func(old *Entry) (*Entry, error) {
+func (s *Store) Lock(ctx context.Context, job *scheduler.Task) (*scheduler.Task, error) {
+	e, err := s.update(ctx, job.Slug, job.Version, func(old *Entry) (*Entry, error) {
 		if old.Suspended {
-			return nil, scheduler.ErrJobNotLocked
+			return nil, scheduler.ErrTaskNotLocked
 		}
-		e := toEntry(task)
+		e := toEntry(job)
 		// the trigger expression is owned by the store and may have been edited there
 		e.Trigger = old.Trigger
 		e.Suspended = old.Suspended
@@ -176,22 +176,22 @@ func (s *Store) Lock(ctx context.Context, task *scheduler.StoreTask) (*scheduler
 		return e, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to lock '%s': %w", task.Slug, err)
+		return nil, fmt.Errorf("failed to lock '%s': %w", job.Slug, err)
 	}
 	return fromEntry(e), nil
 }
 
-func (s *Store) Reschedule(ctx context.Context, task *scheduler.StoreTask) error {
-	_, err := s.update(ctx, task.Slug, task.Version, func(old *Entry) (*Entry, error) {
-		e := toEntry(task)
-		// the trigger expression and the suspension are owned by the store and may have changed while the task was running
+func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
+	_, err := s.update(ctx, job.Slug, job.Version, func(old *Entry) (*Entry, error) {
+		e := toEntry(job)
+		// the trigger expression and the suspension are owned by the store and may have changed while the job was running
 		e.Trigger = old.Trigger
 		e.Suspended = old.Suspended
 		e.Unlock()
 		return e, nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to reschedule %s: %w", task.Slug, err)
+		return fmt.Errorf("failed to reschedule %s: %w", job.Slug, err)
 	}
 	return nil
 }
@@ -240,10 +240,10 @@ func (s *Store) GetSlugs(ctx context.Context) ([]string, error) {
 	return slugs, nil
 }
 
-func (s *Store) Get(ctx context.Context, slug string) (*scheduler.StoreTask, error) {
+func (s *Store) Get(ctx context.Context, slug string) (*scheduler.Task, error) {
 	doc, err := s.docRef(slug).Get(ctx)
 	if status.Code(err) == codes.NotFound {
-		return nil, scheduler.ErrJobNotFound
+		return nil, scheduler.ErrTaskNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get '%s': %w", slug, err)
@@ -316,7 +316,7 @@ func (s *Store) update(ctx context.Context, slug string, version int64, updateFn
 	})
 }
 
-// modify modifies the entry in a transaction. The version is left untouched, so a task being run
+// modify modifies the entry in a transaction. The version is left untouched, so a job being run
 // (locked with a given version) can still be rescheduled afterwards.
 func (s *Store) modify(ctx context.Context, slug string, updateFn func(*Entry) (*Entry, error)) (*Entry, error) {
 	ref := s.docRef(slug)
@@ -324,7 +324,7 @@ func (s *Store) modify(ctx context.Context, slug string, updateFn func(*Entry) (
 	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *gfs.Transaction) error {
 		doc, err := tx.Get(ref)
 		if status.Code(err) == codes.NotFound {
-			return scheduler.ErrJobNotFound
+			return scheduler.ErrTaskNotFound
 		}
 		if err != nil {
 			return err

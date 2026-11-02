@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/quintans/go-scheduler/trigger"
@@ -23,11 +24,15 @@ var (
 	ErrOneOffJob            = errors.New("one-off jobs have no trigger")
 	ErrTriggerNotPersistent = errors.New("trigger has no expression and cannot be persisted")
 	ErrTriggerFinished      = errors.New("trigger yields no next run time")
+	ErrUnknownTrigger       = errors.New("no trigger factory registered with the given name")
+	ErrTriggerRegistered    = errors.New("trigger name already registered")
+	ErrInvalidTriggerName   = errors.New("invalid trigger name: must not be empty nor contain ':' or whitespace")
 )
 
 const (
 	waitOnCalculateNextRunError = 10 * time.Second
 	oneOffSlugSeparator         = ":"
+	triggerNameSeparator        = ":"
 )
 
 type knownJobs struct {
@@ -66,9 +71,15 @@ type Job struct {
 	// One-off jobs have none.
 	Trigger trigger.Trigger
 	Backoff trigger.Backoff
+	// expression is the persisted form of Trigger ("<name>: <expression>"), empty if it cannot be persisted.
+	expression string
 	// OneOff jobs run once and are then removed. They never recur, whatever is stored with the task.
 	OneOff bool
 }
+
+// TriggerFactory builds a trigger from its persisted string expression.
+// Factories are registered by trigger name with RegisterTrigger.
+type TriggerFactory func(expr string) (trigger.Trigger, error)
 
 type ScheduledJob struct {
 	Executer    Executer
@@ -90,23 +101,86 @@ type Scheduler struct {
 
 	// tracks registry
 	registry *knownJobs
+	// trigger factories by trigger name, used to rebuild the triggers persisted in the store
+	triggers map[string]TriggerFactory
 
 	logger *slog.Logger
 }
 
 // NewScheduler returns a new Scheduler.
+// The cron ("cron") and simple ("every") triggers come registered; see RegisterTrigger for custom ones.
 func NewScheduler(store Store, options ...SchedulerOption) *Scheduler {
 	s := &Scheduler{
 		store:     store,
 		heartbeat: time.Minute,
 		registry:  newKnownJobs(),
-		logger:    slog.Default(),
+		triggers: map[string]TriggerFactory{
+			trigger.CronName:   trigger.ParseCronTrigger,
+			trigger.SimpleName: trigger.ParseSimpleTrigger,
+		},
+		logger: slog.Default(),
 	}
 	for _, f := range options {
 		f(s)
 	}
 
 	return s
+}
+
+// RegisterTrigger registers the factory that rebuilds the triggers of the given name from their persisted expression.
+// A trigger is persisted as "<name>: <expression>", where name is the trigger's Name() and expression its Expression().
+// The name must not be empty nor contain ':' or whitespace (ErrInvalidTriggerName), and cannot be registered
+// twice (ErrTriggerRegistered).
+//
+// This should be used before scheduling jobs and before Start: only triggers with a registered name can be scheduled.
+func (s *Scheduler) RegisterTrigger(name string, factory TriggerFactory) error {
+	if s.running {
+		return fmt.Errorf("cannot register trigger after scheduler has started: '%s'", name)
+	}
+	if factory == nil {
+		return fmt.Errorf("failed to register trigger '%s': factory is nil", name)
+	}
+	if name == "" || strings.Contains(name, triggerNameSeparator) || strings.ContainsFunc(name, unicode.IsSpace) {
+		return fmt.Errorf("failed to register trigger '%s': %w", name, ErrInvalidTriggerName)
+	}
+	if _, exists := s.triggers[name]; exists {
+		return fmt.Errorf("failed to register trigger '%s': %w", name, ErrTriggerRegistered)
+	}
+	s.triggers[name] = factory
+	return nil
+}
+
+// encodeTrigger returns the persisted form of the trigger: "<name>: <expression>".
+// Fails with ErrTriggerNotPersistent if the trigger has no expression and with ErrUnknownTrigger
+// if no factory is registered for its name, since it could never be rebuilt.
+func (s *Scheduler) encodeTrigger(trg trigger.Trigger) (string, error) {
+	expr := trg.Expression()
+	if expr == "" {
+		return "", ErrTriggerNotPersistent
+	}
+	name := trg.Name()
+	if _, ok := s.triggers[name]; !ok {
+		return "", fmt.Errorf("%w: '%s'", ErrUnknownTrigger, name)
+	}
+	return name + triggerNameSeparator + " " + expr, nil
+}
+
+// parseTrigger rebuilds a trigger from its persisted form "<name>: <expression>", using the factory registered for name.
+func (s *Scheduler) parseTrigger(stored string) (trigger.Trigger, error) {
+	name, expr, found := strings.Cut(stored, triggerNameSeparator)
+	if !found {
+		return nil, fmt.Errorf("invalid trigger '%s': expected '<name>: <expression>'", stored)
+	}
+	name = strings.TrimSpace(name)
+	factory, ok := s.triggers[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: '%s'", ErrUnknownTrigger, name)
+	}
+	trg, err := factory(strings.TrimSpace(expr))
+	if err != nil {
+		return nil, fmt.Errorf("failed to build trigger '%s': %w", name, err)
+	}
+	return trg, nil
 }
 
 type SchedulerOption func(*Scheduler)
@@ -172,6 +246,8 @@ func WithPayload(payload []byte) ScheduleJobOption {
 // updates the job schedule from its next run onwards, without changing the code.
 // If the stored expression is invalid, this fails. If it becomes invalid later, it is logged and defaultTrigger is used instead.
 //
+// Triggers are persisted as "<name>: <expression>" and rebuilt with the factory registered for the name (see RegisterTrigger),
+// so a default trigger with an expression but no registered name fails with ErrUnknownTrigger.
 // The slug must not contain ':', which is reserved for the tasks of one-off jobs (ErrInvalidJobSlug).
 // This should be used before Start.
 func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, executer Executer, defaultTrigger trigger.Trigger, options ...ScheduleJobOption) error {
@@ -180,6 +256,15 @@ func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, executer Execu
 	}
 	if strings.Contains(slug, oneOffSlugSeparator) {
 		return fmt.Errorf("failed to schedule job '%s': %w", slug, ErrInvalidJobSlug)
+	}
+	if defaultTrigger == nil {
+		return fmt.Errorf("failed to schedule job '%s': trigger is nil", slug)
+	}
+
+	// a trigger without expression is allowed as default, it just isn't persisted
+	expression, err := s.encodeTrigger(defaultTrigger)
+	if err != nil && !errors.Is(err, ErrTriggerNotPersistent) {
+		return fmt.Errorf("failed to schedule job '%s': %w", slug, err)
 	}
 
 	storedJob, err := s.store.Get(ctx, slug)
@@ -190,21 +275,22 @@ func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, executer Execu
 		return fmt.Errorf("failed to load job '%s' from store: %w", slug, err)
 	case storedJob.Trigger != "":
 		// fail fast on an unusable stored trigger
-		if _, err := trigger.Parse(storedJob.Trigger); err != nil {
+		if _, err := s.parseTrigger(storedJob.Trigger); err != nil {
 			return fmt.Errorf("failed to parse stored trigger for job '%s': %w", slug, err)
 		}
 	default:
 		// stored without a trigger: the default is used from now on, so persist it (keeping the run time)
-		if expr := trigger.Expression(defaultTrigger); expr != "" {
-			if err := s.store.UpdateTrigger(ctx, slug, expr, storedJob.When); err != nil {
+		if expression != "" {
+			if err := s.store.UpdateTrigger(ctx, slug, expression, storedJob.When); err != nil {
 				return fmt.Errorf("failed to persist default trigger for job '%s': %w", slug, err)
 			}
 		}
 	}
 
 	return s.scheduleJob(ctx, slug, &Job{
-		Executer: executer,
-		Trigger:  defaultTrigger,
+		Executer:   executer,
+		Trigger:    defaultTrigger,
+		expression: expression,
 	}, options...)
 }
 
@@ -230,7 +316,7 @@ func (s *Scheduler) scheduleJob(ctx context.Context, slug string, job *Job, opti
 		Slug:    slug,
 		Payload: opts.Payload,
 		When:    when,
-		Trigger: trigger.Expression(job.Trigger),
+		Trigger: job.expression,
 	})
 }
 
@@ -426,7 +512,8 @@ func (s *Scheduler) ResumeJob(ctx context.Context, slug string) error {
 // If a run of the job is in progress, the run time it is rescheduled with at the end of the run was already
 // computed with the previous trigger, so the new trigger only takes effect on the run after that one.
 //
-// The trigger must have a string expression (see trigger.Expressioner), otherwise it fails with ErrTriggerNotPersistent.
+// The trigger must have a non-empty string expression (see trigger.Trigger.Expression), otherwise it fails with ErrTriggerNotPersistent,
+// and a factory must be registered for its name (see RegisterTrigger), otherwise it fails with ErrUnknownTrigger.
 // Fails with ErrOneOffJob for the task of a one-off job, since those never recur.
 // Fails with ErrTaskNotFound if the job is not in the store.
 func (s *Scheduler) ChangeJobTrigger(ctx context.Context, slug string, trg trigger.Trigger) error {
@@ -436,9 +523,9 @@ func (s *Scheduler) ChangeJobTrigger(ctx context.Context, slug string, trg trigg
 	if isOneOffSlug(slug) {
 		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrOneOffJob)
 	}
-	expr := trigger.Expression(trg)
-	if expr == "" {
-		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrTriggerNotPersistent)
+	expr, err := s.encodeTrigger(trg)
+	if err != nil {
+		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, err)
 	}
 	when := trg.Next(time.Now())
 	if when.IsZero() {
@@ -464,7 +551,7 @@ func (s *Scheduler) triggerFor(st *Task) trigger.Trigger {
 	if isOneOffSlug(st.Slug) || st.Trigger == "" {
 		return nil
 	}
-	trg, err := trigger.Parse(st.Trigger)
+	trg, err := s.parseTrigger(st.Trigger)
 	if err != nil {
 		s.logger.Warn("invalid stored trigger", "slug", st.Slug, "trigger", st.Trigger, "error", err)
 		return nil
@@ -679,8 +766,12 @@ func (s *Scheduler) resolveTrigger(job Job, task *Task) trigger.Trigger {
 	if task.Trigger == "" {
 		return job.Trigger
 	}
+	if task.Trigger == job.expression {
+		// the stored expression is the one already registered, no need to parse it again
+		return job.Trigger
+	}
 
-	trg, err := trigger.Parse(task.Trigger)
+	trg, err := s.parseTrigger(task.Trigger)
 	if err != nil {
 		s.logger.Warn("invalid stored trigger, using the registered trigger", "slug", task.Slug, "trigger", task.Trigger, "error", err)
 		return job.Trigger

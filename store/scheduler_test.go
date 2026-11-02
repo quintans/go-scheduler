@@ -59,7 +59,7 @@ func testScheduler(t *testing.T, store scheduler.Store) {
 	require.NoError(t, err)
 	require.True(t, st.IsOK())
 	// the trigger expression must survive the store round trip
-	require.Equal(t, "@every 700ms", st.Trigger)
+	require.Equal(t, "every: 700ms", st.Trigger)
 
 	err = sched.DeleteJob(ctx, "good-job")
 	require.NoError(t, err)
@@ -88,7 +88,7 @@ func testStoreSuspend(t *testing.T, store scheduler.Store) {
 	require.NoError(t, store.Clear(ctx))
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	err := store.Create(ctx, &scheduler.Task{Slug: "paused", When: now.Add(-time.Second), Trigger: "@every 1s"})
+	err := store.Create(ctx, &scheduler.Task{Slug: "paused", When: now.Add(-time.Second), Trigger: "every: 1s"})
 	require.NoError(t, err)
 	err = store.Create(ctx, &scheduler.Task{Slug: "later", When: now.Add(time.Hour)})
 	require.NoError(t, err)
@@ -104,7 +104,7 @@ func testStoreSuspend(t *testing.T, store scheduler.Store) {
 	st, err := store.Get(ctx, "paused")
 	require.NoError(t, err)
 	require.True(t, st.Suspended)
-	require.Equal(t, "@every 1s", st.Trigger)
+	require.Equal(t, "every: 1s", st.Trigger)
 
 	// a suspended job is skipped, even if it is due
 	next, err = store.NextRun(ctx)
@@ -133,7 +133,7 @@ func testStoreSuspend(t *testing.T, store scheduler.Store) {
 	require.NoError(t, err)
 	require.False(t, st.Suspended)
 	require.Equal(t, when, st.When)
-	require.Equal(t, "@every 1s", st.Trigger)
+	require.Equal(t, "every: 1s", st.Trigger)
 
 	// a locked (running) job can be suspended; the lock is kept
 	locked, err := store.Lock(ctx, next)
@@ -165,14 +165,14 @@ func testStoreUpdateTrigger(t *testing.T, store scheduler.Store) {
 	require.NoError(t, store.Clear(ctx))
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	err := store.Create(ctx, &scheduler.Task{Slug: "first", When: now.Add(time.Minute), Trigger: "@every 1m", Payload: []byte("p")})
+	err := store.Create(ctx, &scheduler.Task{Slug: "first", When: now.Add(time.Minute), Trigger: "every: 1m", Payload: []byte("p")})
 	require.NoError(t, err)
-	err = store.Create(ctx, &scheduler.Task{Slug: "second", When: now.Add(time.Hour), Trigger: "@every 1h"})
+	err = store.Create(ctx, &scheduler.Task{Slug: "second", When: now.Add(time.Hour), Trigger: "every: 1h"})
 	require.NoError(t, err)
 
 	// moving the run time changes the order of the queue
 	when := now.Add(time.Second)
-	require.NoError(t, store.UpdateTrigger(ctx, "second", "@every 1s", when))
+	require.NoError(t, store.UpdateTrigger(ctx, "second", "every: 1s", when))
 
 	next, err := store.NextRun(ctx)
 	require.NoError(t, err)
@@ -181,25 +181,25 @@ func testStoreUpdateTrigger(t *testing.T, store scheduler.Store) {
 
 	st, err := store.Get(ctx, "second")
 	require.NoError(t, err)
-	require.Equal(t, "@every 1s", st.Trigger)
+	require.Equal(t, "every: 1s", st.Trigger)
 	require.Equal(t, when, st.When)
 	require.False(t, st.Suspended)
 
 	// the other fields are left untouched
-	require.NoError(t, store.UpdateTrigger(ctx, "first", "@every 2m", now.Add(2*time.Minute)))
+	require.NoError(t, store.UpdateTrigger(ctx, "first", "every: 2m", now.Add(2*time.Minute)))
 	st, err = store.Get(ctx, "first")
 	require.NoError(t, err)
-	require.Equal(t, "@every 2m", st.Trigger)
+	require.Equal(t, "every: 2m", st.Trigger)
 	require.Equal(t, now.Add(2*time.Minute), st.When)
 	require.Equal(t, "p", string(st.Payload))
 
 	// a suspended task keeps its suspension
 	require.NoError(t, store.Suspend(ctx, "first"))
-	require.NoError(t, store.UpdateTrigger(ctx, "first", "@every 3m", now.Add(3*time.Minute)))
+	require.NoError(t, store.UpdateTrigger(ctx, "first", "every: 3m", now.Add(3*time.Minute)))
 	st, err = store.Get(ctx, "first")
 	require.NoError(t, err)
 	require.True(t, st.Suspended)
-	require.Equal(t, "@every 3m", st.Trigger)
+	require.Equal(t, "every: 3m", st.Trigger)
 	next, err = store.NextRun(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "second", next.Slug)
@@ -207,7 +207,7 @@ func testStoreUpdateTrigger(t *testing.T, store scheduler.Store) {
 	// a locked (running) task can have its trigger changed; the lock is kept and the change survives the reschedule
 	locked, err := store.Lock(ctx, next)
 	require.NoError(t, err)
-	require.NoError(t, store.UpdateTrigger(ctx, "second", "@every 5s", when.Add(5*time.Second)))
+	require.NoError(t, store.UpdateTrigger(ctx, "second", "every: 5s", when.Add(5*time.Second)))
 	_, err = store.NextRun(ctx)
 	require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
 	locked.Payload = []byte("ran")
@@ -215,11 +215,11 @@ func testStoreUpdateTrigger(t *testing.T, store scheduler.Store) {
 	require.NoError(t, store.Reschedule(ctx, locked))
 	st, err = store.Get(ctx, "second")
 	require.NoError(t, err)
-	require.Equal(t, "@every 5s", st.Trigger)
+	require.Equal(t, "every: 5s", st.Trigger)
 	require.Equal(t, "ran", string(st.Payload))
 	require.Equal(t, when.Add(time.Second), st.When)
 
-	require.ErrorIs(t, store.UpdateTrigger(ctx, "unknown", "@every 1s", when), scheduler.ErrTaskNotFound)
+	require.ErrorIs(t, store.UpdateTrigger(ctx, "unknown", "every: 1s", when), scheduler.ErrTaskNotFound)
 
 	require.NoError(t, store.Clear(ctx))
 }

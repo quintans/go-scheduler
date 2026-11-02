@@ -16,12 +16,9 @@ const everyPrefix = "@every "
 type Trigger interface {
 	// Next returns the next trigger time.
 	Next(prev time.Time) time.Time
-}
-
-// Expressioner is implemented by triggers that can be represented as a string expression.
-// The expression can be persisted and later rebuilt into a Trigger with Parse.
-type Expressioner interface {
 	// Expression returns the string representation of the trigger, parsable by Parse.
+	// The expression is what gets persisted in the store and later rebuilt into a Trigger.
+	// Triggers that cannot be represented as an expression return an empty string; such triggers cannot be persisted.
 	Expression() string
 }
 
@@ -44,15 +41,6 @@ func Parse(expr string) (Trigger, error) {
 	}
 
 	return NewCronTrigger(expr)
-}
-
-// Expression returns the string expression of the trigger if it implements Expressioner,
-// otherwise it returns an empty string.
-func Expression(trg Trigger) string {
-	if e, ok := trg.(Expressioner); ok {
-		return e.Expression()
-	}
-	return ""
 }
 
 // SimpleTrigger implements the scheduler.Trigger interface; uses a time.Duration interval.

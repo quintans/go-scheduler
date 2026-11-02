@@ -195,7 +195,7 @@ func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, executer Execu
 		}
 	default:
 		// stored without a trigger: the default is used from now on, so persist it (keeping the run time)
-		if expr := trigger.Expression(defaultTrigger); expr != "" {
+		if expr := defaultTrigger.Expression(); expr != "" {
 			if err := s.store.UpdateTrigger(ctx, slug, expr, storedJob.When); err != nil {
 				return fmt.Errorf("failed to persist default trigger for job '%s': %w", slug, err)
 			}
@@ -230,7 +230,7 @@ func (s *Scheduler) scheduleJob(ctx context.Context, slug string, job *Job, opti
 		Slug:    slug,
 		Payload: opts.Payload,
 		When:    when,
-		Trigger: trigger.Expression(job.Trigger),
+		Trigger: job.Trigger.Expression(),
 	})
 }
 
@@ -426,7 +426,7 @@ func (s *Scheduler) ResumeJob(ctx context.Context, slug string) error {
 // If a run of the job is in progress, the run time it is rescheduled with at the end of the run was already
 // computed with the previous trigger, so the new trigger only takes effect on the run after that one.
 //
-// The trigger must have a string expression (see trigger.Expressioner), otherwise it fails with ErrTriggerNotPersistent.
+// The trigger must have a non-empty string expression (see trigger.Trigger.Expression), otherwise it fails with ErrTriggerNotPersistent.
 // Fails with ErrOneOffJob for the task of a one-off job, since those never recur.
 // Fails with ErrTaskNotFound if the job is not in the store.
 func (s *Scheduler) ChangeJobTrigger(ctx context.Context, slug string, trg trigger.Trigger) error {
@@ -436,7 +436,7 @@ func (s *Scheduler) ChangeJobTrigger(ctx context.Context, slug string, trg trigg
 	if isOneOffSlug(slug) {
 		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrOneOffJob)
 	}
-	expr := trigger.Expression(trg)
+	expr := trg.Expression()
 	if expr == "" {
 		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrTriggerNotPersistent)
 	}

@@ -76,6 +76,9 @@ The Trigger interface is responsible for computing the next execution time:
 type Trigger interface {
     // Next returns the next trigger time.
     Next(prev time.Time) time.Time
+    // Expression returns the string representation of the trigger, parsable by trigger.Parse.
+    // It is what gets persisted in the store. An empty string means the trigger cannot be persisted.
+    Expression() string
 }
 ```
 
@@ -229,7 +232,7 @@ A few things to keep in mind:
 - the job does not need to be registered in the instance that makes the change (e.g. an admin tool sharing the store); other instances pick the change up at the latest on the next heartbeat;
 - a suspended job keeps its suspension, the new trigger is used once it is resumed;
 - if a run is in progress, it is rescheduled with the trigger it was started with, the new trigger takes effect on the run after that one;
-- the trigger must have a string expression (`trigger.Expressioner`, as cron and simple triggers do), otherwise it fails with `ErrTriggerNotPersistent`;
+- the trigger must have a non-empty `Expression()` (as cron and simple triggers do), otherwise it fails with `ErrTriggerNotPersistent`;
 - one-off jobs never recur, so changing the trigger of one of their tasks fails with `ErrOneOffJob`.
 
 ### Suspending Jobs

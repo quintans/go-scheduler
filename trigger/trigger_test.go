@@ -60,20 +60,12 @@ func TestExpressionRoundTrip(t *testing.T) {
 		trigger.NewSimpleTrigger(2 * time.Hour),
 		cronTrigger,
 	} {
-		expr := trigger.Expression(trg)
+		expr := trg.Expression()
 		require.NotEmpty(t, expr)
 
 		parsed, err := trigger.Parse(expr)
 		require.NoError(t, err)
-		require.Equal(t, expr, trigger.Expression(parsed))
+		require.Equal(t, expr, parsed.Expression())
 		require.Equal(t, trg.Next(fromEpoch), parsed.Next(fromEpoch))
 	}
 }
-
-func TestExpressionUnsupportedTrigger(t *testing.T) {
-	require.Empty(t, trigger.Expression(opaqueTrigger{}))
-}
-
-type opaqueTrigger struct{}
-
-func (opaqueTrigger) Next(prev time.Time) time.Time { return prev }

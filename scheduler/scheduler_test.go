@@ -733,6 +733,7 @@ func TestChangeJobTrigger(t *testing.T) {
 type opaqueTrigger struct{}
 
 func (opaqueTrigger) Next(prev time.Time) time.Time { return prev.Add(time.Second) }
+func (opaqueTrigger) Expression() string            { return "" }
 
 // slowExecuter behaves like DummyExecuter but takes duration to run.
 type slowExecuter struct {

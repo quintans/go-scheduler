@@ -141,7 +141,7 @@ func TestScheduleJob(t *testing.T) {
 				Slug:    "load-job",
 				Payload: []byte("Loaded"),
 				When:    firstRun,
-				Trigger: "@every 2s",
+				Trigger: "every: 2s",
 			})
 			require.NoError(t, err)
 
@@ -151,7 +151,7 @@ func TestScheduleJob(t *testing.T) {
 			// the stored job is kept untouched
 			st, err := store.Get(ctx, "load-job")
 			require.NoError(t, err)
-			assert.Equal(t, "@every 2s", st.Trigger)
+			assert.Equal(t, "every: 2s", st.Trigger)
 			assert.Equal(t, firstRun, st.When)
 
 			sched.Start(ctx, 1)
@@ -162,7 +162,7 @@ func TestScheduleJob(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "Loaded#1", string(st.Payload))
 			assert.Equal(t, firstRun.Add(2*time.Second), st.When)
-			assert.Equal(t, "@every 2s", st.Trigger)
+			assert.Equal(t, "every: 2s", st.Trigger)
 		})
 	})
 
@@ -182,8 +182,8 @@ func TestScheduleJob(t *testing.T) {
 			// simulate an edit made directly in the store while the scheduler is running
 			st, err := store.Get(ctx, "load-job")
 			require.NoError(t, err)
-			require.Equal(t, "@every 2s", st.Trigger)
-			editStoredTrigger(t, store, "load-job", "@every 5s")
+			require.Equal(t, "every: 2s", st.Trigger)
+			editStoredTrigger(t, store, "load-job", "every: 5s")
 
 			time.Sleep(1500 * time.Millisecond)
 
@@ -192,7 +192,7 @@ func TestScheduleJob(t *testing.T) {
 			assert.Equal(t, firstRun.Add(5*time.Second), st.When)
 
 			// an invalid edit falls back to the registered trigger
-			editStoredTrigger(t, store, "load-job", "not a cron")
+			editStoredTrigger(t, store, "load-job", "not a trigger")
 			time.Sleep(5 * time.Second)
 
 			st, err = store.Get(ctx, "load-job")
@@ -214,7 +214,7 @@ func TestScheduleJob(t *testing.T) {
 
 		st, err := store.Get(ctx, "load-job")
 		require.NoError(t, err)
-		assert.Equal(t, "0 0 * * * *", st.Trigger)
+		assert.Equal(t, "cron: 0 0 * * * *", st.Trigger)
 		assert.Equal(t, when, st.When)
 	})
 
@@ -234,7 +234,7 @@ func TestScheduleJob(t *testing.T) {
 			// the default is persisted, keeping the stored run time
 			st, err := store.Get(ctx, "load-job")
 			require.NoError(t, err)
-			assert.Equal(t, "@every 3s", st.Trigger)
+			assert.Equal(t, "every: 3s", st.Trigger)
 			assert.Equal(t, firstRun, st.When)
 
 			sched.Start(ctx, 1)
@@ -243,7 +243,7 @@ func TestScheduleJob(t *testing.T) {
 			st, err = store.Get(ctx, "load-job")
 			require.NoError(t, err)
 			assert.Equal(t, firstRun.Add(3*time.Second), st.When)
-			assert.Equal(t, "@every 3s", st.Trigger)
+			assert.Equal(t, "every: 3s", st.Trigger)
 		})
 	})
 
@@ -260,7 +260,7 @@ func TestScheduleJob(t *testing.T) {
 		store := memory.New()
 		sched := scheduler.NewScheduler(store)
 
-		err := store.Create(ctx, &scheduler.Task{Slug: "load-job", When: time.Now(), Trigger: "not a cron"})
+		err := store.Create(ctx, &scheduler.Task{Slug: "load-job", When: time.Now(), Trigger: "not a trigger"})
 		require.NoError(t, err)
 
 		err = sched.ScheduleJob(ctx, "load-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
@@ -537,7 +537,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			assert.Equal(t, changedAt.Add(time.Second), sj.NextRunTime)
 			st, err := store.Get(ctx, "job")
 			require.NoError(t, err)
-			assert.Equal(t, "@every 1s", st.Trigger)
+			assert.Equal(t, "every: 1s", st.Trigger)
 
 			// the parked worker was woken up and runs the job at the new time
 			time.Sleep(1500 * time.Millisecond)
@@ -545,7 +545,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "Job#1", string(st.Payload))
 			assert.Equal(t, changedAt.Add(2*time.Second), st.When)
-			assert.Equal(t, "@every 1s", st.Trigger)
+			assert.Equal(t, "every: 1s", st.Trigger)
 
 			// a cron trigger works the same way
 			cron, err := trigger.NewCronTrigger("0 0 * * * *")
@@ -553,7 +553,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			require.NoError(t, sched.ChangeJobTrigger(ctx, "job", cron))
 			st, err = store.Get(ctx, "job")
 			require.NoError(t, err)
-			assert.Equal(t, "0 0 * * * *", st.Trigger)
+			assert.Equal(t, "cron: 0 0 * * * *", st.Trigger)
 			assert.Equal(t, cron.Next(time.Now()), st.When)
 		})
 	})
@@ -576,7 +576,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			st, err := store.Get(ctx, "job")
 			require.NoError(t, err)
 			assert.True(t, st.Suspended)
-			assert.Equal(t, "@every 1s", st.Trigger)
+			assert.Equal(t, "every: 1s", st.Trigger)
 			assert.Equal(t, "Job", string(st.Payload), "a suspended job must not run")
 
 			require.NoError(t, sched.ResumeJob(ctx, "job"))
@@ -616,7 +616,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "Job#1", string(st.Payload))
 			assert.Equal(t, changedAt.Add(4*time.Second), st.When)
-			assert.Equal(t, "@every 2s", st.Trigger)
+			assert.Equal(t, "every: 2s", st.Trigger)
 		})
 	})
 
@@ -641,7 +641,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			st, err := store.Get(ctx, "job")
 			require.NoError(t, err)
 			assert.Equal(t, "Job#1", string(st.Payload))
-			assert.Equal(t, "@every 1s", st.Trigger)
+			assert.Equal(t, "every: 1s", st.Trigger)
 			assert.Equal(t, changedAt.Add(2*time.Second), st.When)
 		})
 	})
@@ -667,7 +667,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			st, err := store.Get(ctx, "job")
 			require.NoError(t, err)
 			assert.Equal(t, "Job#1", string(st.Payload))
-			assert.Equal(t, "@every 3s", st.Trigger)
+			assert.Equal(t, "every: 3s", st.Trigger)
 			assert.Equal(t, firstRun.Add(10*time.Second), st.When)
 
 			// from then on the new trigger is used
@@ -704,7 +704,7 @@ func TestChangeJobTrigger(t *testing.T) {
 		// nothing was changed
 		st, err := store.Get(ctx, "job")
 		require.NoError(t, err)
-		assert.Equal(t, "@every 1h0m0s", st.Trigger)
+		assert.Equal(t, "every: 1h0m0s", st.Trigger)
 		st, err = store.Get(ctx, ooSlug)
 		require.NoError(t, err)
 		assert.Empty(t, st.Trigger)
@@ -718,7 +718,7 @@ func TestChangeJobTrigger(t *testing.T) {
 			require.NoError(t, sched.RegisterOneOffJob("oo-job", &DummyExecuter{}))
 
 			// simulate an edit made directly in the store
-			err := store.Create(ctx, &scheduler.Task{Slug: "oo-job:1", When: time.Now().Add(time.Second), Trigger: "@every 1s"})
+			err := store.Create(ctx, &scheduler.Task{Slug: "oo-job:1", When: time.Now().Add(time.Second), Trigger: "every: 1s"})
 			require.NoError(t, err)
 			sched.Start(ctx, 1)
 
@@ -729,11 +729,115 @@ func TestChangeJobTrigger(t *testing.T) {
 	})
 }
 
+func TestRegisterTrigger(t *testing.T) {
+	t.Run("a custom trigger is persisted under its name and rebuilt with its factory", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx := t.Context()
+			store := memory.New()
+			sched := scheduler.NewScheduler(store)
+			require.NoError(t, sched.RegisterTrigger("step", parseStepTrigger))
+
+			firstRun := time.Now().Add(time.Second)
+			err := sched.ScheduleJob(ctx, "step-job", &DummyExecuter{}, stepTrigger{step: 2}, scheduler.WithWhen(firstRun))
+			require.NoError(t, err)
+
+			st, err := store.Get(ctx, "step-job")
+			require.NoError(t, err)
+			assert.Equal(t, "step: 2s", st.Trigger)
+
+			// an edit in the store is honoured through the registered factory
+			editStoredTrigger(t, store, "step-job", "step:5s")
+			sched.Start(ctx, 1)
+			time.Sleep(1500 * time.Millisecond)
+
+			st, err = store.Get(ctx, "step-job")
+			require.NoError(t, err)
+			assert.Equal(t, firstRun.Add(5*time.Second), st.When)
+
+			// and so is a change through the scheduler
+			require.NoError(t, sched.ChangeJobTrigger(ctx, "step-job", stepTrigger{step: 7}))
+			st, err = store.Get(ctx, "step-job")
+			require.NoError(t, err)
+			assert.Equal(t, "step: 7s", st.Trigger)
+		})
+	})
+
+	t.Run("a stored trigger with an unknown name is rebuilt once its factory is registered", func(t *testing.T) {
+		ctx := t.Context()
+		store := memory.New()
+		err := store.Create(ctx, &scheduler.Task{Slug: "step-job", When: time.Now(), Trigger: "step: 3s"})
+		require.NoError(t, err)
+
+		sched := scheduler.NewScheduler(store)
+		err = sched.ScheduleJob(ctx, "step-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
+		require.ErrorIs(t, err, scheduler.ErrUnknownTrigger)
+
+		sched = scheduler.NewScheduler(store)
+		require.NoError(t, sched.RegisterTrigger("step", parseStepTrigger))
+		err = sched.ScheduleJob(ctx, "step-job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Second))
+		require.NoError(t, err)
+	})
+
+	t.Run("fails early on a trigger whose name is not registered", func(t *testing.T) {
+		ctx := t.Context()
+		store := memory.New()
+		sched := scheduler.NewScheduler(store)
+
+		err := sched.ScheduleJob(ctx, "step-job", &DummyExecuter{}, stepTrigger{step: 2})
+		require.ErrorIs(t, err, scheduler.ErrUnknownTrigger)
+		_, err = store.Get(ctx, "step-job")
+		require.ErrorIs(t, err, scheduler.ErrTaskNotFound)
+
+		require.NoError(t, sched.ScheduleJob(ctx, "job", &DummyExecuter{}, trigger.NewSimpleTrigger(time.Hour)))
+		err = sched.ChangeJobTrigger(ctx, "job", stepTrigger{step: 2})
+		require.ErrorIs(t, err, scheduler.ErrUnknownTrigger)
+		st, err := store.Get(ctx, "job")
+		require.NoError(t, err)
+		assert.Equal(t, "every: 1h0m0s", st.Trigger)
+	})
+
+	t.Run("validates the registration", func(t *testing.T) {
+		sched := scheduler.NewScheduler(memory.New())
+
+		for _, name := range []string{"", "a:b", "a b", "a\tb"} {
+			require.ErrorIs(t, sched.RegisterTrigger(name, parseStepTrigger), scheduler.ErrInvalidTriggerName, name)
+		}
+		require.Error(t, sched.RegisterTrigger("step", nil))
+		require.ErrorIs(t, sched.RegisterTrigger(trigger.CronName, parseStepTrigger), scheduler.ErrTriggerRegistered)
+
+		require.NoError(t, sched.RegisterTrigger("step", parseStepTrigger))
+		require.ErrorIs(t, sched.RegisterTrigger("step", parseStepTrigger), scheduler.ErrTriggerRegistered)
+
+		sched.Start(t.Context(), 1)
+		require.Error(t, sched.RegisterTrigger("late", parseStepTrigger))
+	})
+}
+
 // opaqueTrigger is a trigger without a string expression.
 type opaqueTrigger struct{}
 
+func (opaqueTrigger) Name() string                  { return "opaque" }
 func (opaqueTrigger) Next(prev time.Time) time.Time { return prev.Add(time.Second) }
 func (opaqueTrigger) Expression() string            { return "" }
+
+// stepTrigger is a custom trigger: fires at every multiple of step seconds, as a "<step>s" expression.
+type stepTrigger struct {
+	step int
+}
+
+func parseStepTrigger(expr string) (trigger.Trigger, error) {
+	step, err := strconv.Atoi(strings.TrimSuffix(expr, "s"))
+	if err != nil || step <= 0 {
+		return nil, fmt.Errorf("invalid step '%s'", expr)
+	}
+	return stepTrigger{step: step}, nil
+}
+
+func (stepTrigger) Name() string { return "step" }
+func (t stepTrigger) Next(prev time.Time) time.Time {
+	return prev.Add(time.Duration(t.step) * time.Second)
+}
+func (t stepTrigger) Expression() string { return fmt.Sprintf("%ds", t.step) }
 
 // slowExecuter behaves like DummyExecuter but takes duration to run.
 type slowExecuter struct {

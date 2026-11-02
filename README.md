@@ -74,13 +74,18 @@ The Trigger interface is responsible for computing the next execution time:
 ```go
 // Triggers are the 'mechanism' by which Jobs are scheduled.
 type Trigger interface {
+    // Name identifies the kind of trigger. It selects the factory used to rebuild the trigger from its Expression.
+    Name() string
     // Next returns the next trigger time.
     Next(prev time.Time) time.Time
-    // Expression returns the string representation of the trigger, parsable by trigger.Parse.
+    // Expression returns the string representation of the trigger, parsable by the factory registered under Name.
     // It is what gets persisted in the store. An empty string means the trigger cannot be persisted.
     Expression() string
 }
 ```
+
+Two triggers are provided, and registered in every scheduler: `trigger.CronTrigger` (name `cron`) and `trigger.SimpleTrigger` (name `every`).
+See [Custom Triggers](#custom-triggers) to use your own.
 
 #### Store Interface
 
@@ -196,7 +201,8 @@ sched.Start(ctx, 1)
 
 The trigger persisted in the store always takes precedence over the one given in code.
 `ScheduleJob` reads the stored expression and uses it to schedule the job, so the schedule can be changed in the store without a new deployment.
-The provided trigger is only a default, used when the job is not in the store yet (or was stored without a trigger); in that case its expression is persisted (cron expressions as given, simple triggers as `@every <duration>`).
+The provided trigger is only a default, used when the job is not in the store yet (or was stored without a trigger); in that case it is persisted as `<name>: <expression>` (e.g. `cron: @hourly`, `every: 5m0s`).
+The name selects the factory that rebuilds the trigger when the expression is read back, so only triggers whose name is registered in the scheduler can be scheduled (see [Custom Triggers](#custom-triggers)).
 
 The stored expression is re-read every time the job runs, so a change made while the scheduler is running takes effect on the next execution (an invalid expression is logged and the default trigger is used instead).
 
@@ -233,7 +239,37 @@ A few things to keep in mind:
 - a suspended job keeps its suspension, the new trigger is used once it is resumed;
 - if a run is in progress, it is rescheduled with the trigger it was started with, the new trigger takes effect on the run after that one;
 - the trigger must have a non-empty `Expression()` (as cron and simple triggers do), otherwise it fails with `ErrTriggerNotPersistent`;
+- a factory must be registered for the trigger's `Name()`, otherwise it fails with `ErrUnknownTrigger`;
 - one-off jobs never recur, so changing the trigger of one of their tasks fails with `ErrOneOffJob`.
+
+### Custom Triggers
+
+Any type implementing `trigger.Trigger` can be used, as long as the scheduler knows how to rebuild it from the expression it persists.
+That is done by registering a factory for the trigger name, before scheduling jobs with it and before starting the scheduler.
+
+```go
+// fires on every multiple of step seconds, persisted as "step: <step>s"
+type StepTrigger struct{ Step int }
+
+func (StepTrigger) Name() string                    { return "step" }
+func (t StepTrigger) Expression() string            { return fmt.Sprintf("%ds", t.Step) }
+func (t StepTrigger) Next(prev time.Time) time.Time { return prev.Add(time.Duration(t.Step) * time.Second) }
+
+func ParseStepTrigger(expr string) (trigger.Trigger, error) {
+	step, err := strconv.Atoi(strings.TrimSuffix(expr, "s"))
+	if err != nil {
+		return nil, err
+	}
+	return StepTrigger{Step: step}, nil
+}
+
+sched := scheduler.NewScheduler(store)
+sched.RegisterTrigger("step", ParseStepTrigger)
+sched.ScheduleJob(ctx, "step-job", &PrintExecuter{}, StepTrigger{Step: 30})
+```
+
+The name must not be empty nor contain `:` or whitespace, and `cron` and `every` are taken by the provided triggers.
+Scheduling or changing to a trigger whose name has no factory fails with `ErrUnknownTrigger`, as does `ScheduleJob` when the stored expression names a trigger unknown to this scheduler: every instance sharing the store must register the same triggers.
 
 ### Suspending Jobs
 

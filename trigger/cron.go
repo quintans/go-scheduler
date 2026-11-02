@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -14,6 +15,7 @@ type CronTrigger struct {
 
 // NewCronTrigger returns a new CronTrigger.
 func NewCronTrigger(expr string) (*CronTrigger, error) {
+	expr = strings.TrimSpace(expr)
 	parser := cron.NewParser(
 		cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 	)
@@ -23,6 +25,16 @@ func NewCronTrigger(expr string) (*CronTrigger, error) {
 	}
 
 	return &CronTrigger{expr: expr, schedule: schedule}, nil
+}
+
+// ParseCronTrigger is the factory of CronTrigger.
+func ParseCronTrigger(expr string) (Trigger, error) {
+	return NewCronTrigger(expr)
+}
+
+// Name returns CronName.
+func (ct *CronTrigger) Name() string {
+	return CronName
 }
 
 func (ct *CronTrigger) Next(prev time.Time) time.Time {

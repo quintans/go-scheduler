@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	gfs "cloud.google.com/go/firestore"
@@ -22,6 +23,7 @@ var errOptimisticLocking = errors.New("job was changed by another process")
 
 type Entry struct {
 	Slug        string    `firestore:"slug"`
+	Executer    string    `firestore:"executer"`
 	Payload     []byte    `firestore:"payload,omitempty"`
 	When        time.Time `firestore:"run_at"`
 	Version     int64     `firestore:"version"`
@@ -47,6 +49,7 @@ func (e *Entry) IsUnlocked(t time.Time) bool {
 func toEntry(t *scheduler.Task) *Entry {
 	return &Entry{
 		Slug:      t.Slug,
+		Executer:  t.Executer,
 		Payload:   t.Payload,
 		When:      t.When.UTC(),
 		Version:   t.Version,
@@ -63,6 +66,7 @@ func fromEntry(e *Entry) *scheduler.Task {
 	}
 	return &scheduler.Task{
 		Slug:      e.Slug,
+		Executer:  e.Executer,
 		Payload:   e.Payload,
 		When:      e.When.UTC(),
 		Version:   e.Version,
@@ -131,7 +135,7 @@ func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
 	return nil
 }
 
-func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
+func (s *Store) NextRun(ctx context.Context, executers []string) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 
 	// ideally we would like to retrieve documents where "locked_until < now" and order ascending by "run_at"
@@ -157,7 +161,7 @@ func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert doc to entry on next run: %w", err)
 		}
-		if !entry.Suspended && entry.IsUnlocked(now) {
+		if !entry.Suspended && entry.IsUnlocked(now) && slices.Contains(executers, entry.Executer) {
 			return fromEntry(entry), nil
 		}
 	}
@@ -169,7 +173,8 @@ func (s *Store) Lock(ctx context.Context, job *scheduler.Task) (*scheduler.Task,
 			return nil, scheduler.ErrTaskNotLocked
 		}
 		e := toEntry(job)
-		// the trigger expression is owned by the store and may have been edited there
+		// the executer and the trigger expression are owned by the store (the latter may have been edited there)
+		e.Executer = old.Executer
 		e.Trigger = old.Trigger
 		e.Suspended = old.Suspended
 		e.Lock(s.lockDuration)
@@ -184,7 +189,8 @@ func (s *Store) Lock(ctx context.Context, job *scheduler.Task) (*scheduler.Task,
 func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
 	_, err := s.update(ctx, job.Slug, job.Version, func(old *Entry) (*Entry, error) {
 		e := toEntry(job)
-		// the trigger expression and the suspension are owned by the store and may have changed while the job was running
+		// the executer, the trigger expression and the suspension are owned by the store and may have changed while the job was running
+		e.Executer = old.Executer
 		e.Trigger = old.Trigger
 		e.Suspended = old.Suspended
 		e.Unlock()

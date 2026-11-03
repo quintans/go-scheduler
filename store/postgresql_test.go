@@ -36,6 +36,9 @@ func TestPgStore(t *testing.T) {
 	t.Run("postgres update trigger", func(t *testing.T) {
 		testStoreUpdateTrigger(t, store)
 	})
+	t.Run("postgres next run by executer", func(t *testing.T) {
+		testStoreNextRunByExecuter(t, store)
+	})
 }
 
 type PgConfig struct {

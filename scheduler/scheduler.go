@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,10 +19,12 @@ import (
 var (
 	ErrTaskNotFound         = errors.New("no task with the given Slug was found")
 	ErrTaskNotLocked        = errors.New("task lock was not acquired")
-	ErrJobAlreadyRegistered = errors.New("job already registered")
 	ErrTaskAlreadyExists    = errors.New("task already exists")
-	ErrInvalidJobSlug       = errors.New("invalid job slug: must not contain ':'")
-	ErrOneOffJob            = errors.New("one-off jobs have no trigger")
+	ErrExecuterRegistered   = errors.New("executer name already registered")
+	ErrExecuterNotFound     = errors.New("no executer registered with the given name")
+	ErrExecuterMismatch     = errors.New("task is stored with a different executer")
+	ErrInvalidExecuterName  = errors.New("invalid executer name: must not be empty")
+	ErrOneOffJob            = errors.New("one-off tasks have no trigger")
 	ErrTriggerNotPersistent = errors.New("trigger has no expression and cannot be persisted")
 	ErrTriggerFinished      = errors.New("trigger yields no next run time")
 	ErrUnknownTrigger       = errors.New("no trigger factory registered with the given name")
@@ -35,54 +38,61 @@ const (
 	triggerNameSeparator        = ":"
 )
 
-type knownJobs struct {
-	mu   sync.RWMutex
-	jobs map[string]*Job
+// registeredExecuter is a registered Executer along with the backoff used when its runs fail.
+type registeredExecuter struct {
+	Executer
+	backoff trigger.Backoff
 }
 
-func newKnownJobs() *knownJobs {
-	return &knownJobs{
-		jobs: map[string]*Job{},
+type registry struct {
+	mu        sync.RWMutex
+	executers map[string]*registeredExecuter
+}
+
+func newRegistry() *registry {
+	return &registry{
+		executers: map[string]*registeredExecuter{},
 	}
 }
 
-func (m *knownJobs) add(slug string, job *Job) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (r *registry) add(name string, e *registeredExecuter) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	if _, exists := m.jobs[slug]; exists {
-		return fmt.Errorf("job with slug '%s' already registered: %w", slug, ErrJobAlreadyRegistered)
+	if _, exists := r.executers[name]; exists {
+		return fmt.Errorf("executer '%s': %w", name, ErrExecuterRegistered)
 	}
 
-	m.jobs[slug] = job
+	r.executers[name] = e
 	return nil
 }
 
-func (m *knownJobs) get(slug string) *Job {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (r *registry) get(name string) *registeredExecuter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	return m.jobs[slug]
+	return r.executers[name]
 }
 
-type Job struct {
-	Executer Executer
-	// Trigger is the default trigger of the job, used when the task has no (valid) stored trigger expression.
-	// One-off jobs have none.
-	Trigger trigger.Trigger
-	Backoff trigger.Backoff
-	// expression is the persisted form of Trigger ("<name>: <expression>"), empty if it cannot be persisted.
-	expression string
-	// OneOff jobs run once and are then removed. They never recur, whatever is stored with the task.
-	OneOff bool
+// names returns the names of the registered executers, sorted.
+func (r *registry) names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.executers))
+	for name := range r.executers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
-// TriggerFactory builds a trigger from its persisted string expression.
-// Factories are registered by trigger name with RegisterTrigger.
-type TriggerFactory func(expr string) (trigger.Trigger, error)
-
+// ScheduledJob is the metadata of a scheduled job, as read from the store.
 type ScheduledJob struct {
-	Executer    Executer
+	// Executer is the name of the executer that runs the job (see RegisterExecuter).
+	Executer string
+	// Trigger is the persisted trigger expression ("<name>: <expression>"). Empty for one-off tasks.
+	Trigger     string
 	NextRunTime time.Time
 	Suspended   bool
 }
@@ -99,10 +109,14 @@ type Scheduler struct {
 	// to avoid concurrent instances to collide when locking we can add some randomness
 	jitter time.Duration
 
-	// tracks registry
-	registry *knownJobs
-	// trigger factories by trigger name, used to rebuild the triggers persisted in the store
-	triggers map[string]TriggerFactory
+	// executers by name, used to run the tasks read from the store
+	registry *registry
+	// names of the registered executers, used to read only their tasks from the store.
+	// Set by Start, when nothing can be registered any more, so the workers can read it without locking.
+	executers []string
+	// trigger parsers by trigger name, used to rebuild the triggers persisted in the store.
+	// Only written before Start, so the workers can read it without locking.
+	triggers map[string]func(expr string) (trigger.Trigger, error)
 
 	logger *slog.Logger
 }
@@ -113,8 +127,8 @@ func NewScheduler(store Store, options ...SchedulerOption) *Scheduler {
 	s := &Scheduler{
 		store:     store,
 		heartbeat: time.Minute,
-		registry:  newKnownJobs(),
-		triggers: map[string]TriggerFactory{
+		registry:  newRegistry(),
+		triggers: map[string]func(expr string) (trigger.Trigger, error){
 			trigger.CronName:   trigger.ParseCronTrigger,
 			trigger.SimpleName: trigger.ParseSimpleTrigger,
 		},
@@ -127,18 +141,24 @@ func NewScheduler(store Store, options ...SchedulerOption) *Scheduler {
 	return s
 }
 
-// RegisterTrigger registers the factory that rebuilds the triggers of the given name from their persisted expression.
-// A trigger is persisted as "<name>: <expression>", where name is the trigger's Name() and expression its Expression().
+// RegisterTrigger registers a kind of trigger under its Name(), so that the triggers persisted in the store
+// as "<name>: <expression>" can be rebuilt with its Parse method. Any instance will do, e.g. the zero value.
+//
+// ScheduleJob registers the trigger it is given if it is not registered yet, so this is only needed for the kinds
+// of trigger that this instance does not schedule that way before Start: those given to ChangeJobTrigger, those
+// scheduled by another instance, or whose expression was edited in the store.
 // The name must not be empty nor contain ':' or whitespace (ErrInvalidTriggerName), and cannot be registered
 // twice (ErrTriggerRegistered).
 //
-// This should be used before scheduling jobs and before Start: only triggers with a registered name can be scheduled.
-func (s *Scheduler) RegisterTrigger(name string, factory TriggerFactory) error {
+// This must be used before Start: every replica sharing the store must know the same triggers before any of them
+// runs, otherwise a task may be picked up by a replica unable to rebuild its trigger.
+func (s *Scheduler) RegisterTrigger(trg trigger.Trigger) error {
+	if trg == nil {
+		return errors.New("failed to register trigger: trigger is nil")
+	}
+	name := trg.Name()
 	if s.running {
 		return fmt.Errorf("cannot register trigger after scheduler has started: '%s'", name)
-	}
-	if factory == nil {
-		return fmt.Errorf("failed to register trigger '%s': factory is nil", name)
 	}
 	if name == "" || strings.Contains(name, triggerNameSeparator) || strings.ContainsFunc(name, unicode.IsSpace) {
 		return fmt.Errorf("failed to register trigger '%s': %w", name, ErrInvalidTriggerName)
@@ -146,13 +166,26 @@ func (s *Scheduler) RegisterTrigger(name string, factory TriggerFactory) error {
 	if _, exists := s.triggers[name]; exists {
 		return fmt.Errorf("failed to register trigger '%s': %w", name, ErrTriggerRegistered)
 	}
-	s.triggers[name] = factory
+	s.triggers[name] = trg.Parse
 	return nil
+}
+
+// ensureTriggerRegistered registers the kind of the trigger if it is not registered yet.
+// Fails with ErrUnknownTrigger if it is not registered and the scheduler has started, since it can no longer be.
+func (s *Scheduler) ensureTriggerRegistered(trg trigger.Trigger) error {
+	name := trg.Name()
+	if _, ok := s.triggers[name]; ok {
+		return nil
+	}
+	if s.running {
+		return fmt.Errorf("%w: '%s' (triggers cannot be registered after Start)", ErrUnknownTrigger, name)
+	}
+	return s.RegisterTrigger(trg)
 }
 
 // encodeTrigger returns the persisted form of the trigger: "<name>: <expression>".
 // Fails with ErrTriggerNotPersistent if the trigger has no expression and with ErrUnknownTrigger
-// if no factory is registered for its name, since it could never be rebuilt.
+// if its name is not registered, since it could never be rebuilt.
 func (s *Scheduler) encodeTrigger(trg trigger.Trigger) (string, error) {
 	expr := trg.Expression()
 	if expr == "" {
@@ -165,18 +198,18 @@ func (s *Scheduler) encodeTrigger(trg trigger.Trigger) (string, error) {
 	return name + triggerNameSeparator + " " + expr, nil
 }
 
-// parseTrigger rebuilds a trigger from its persisted form "<name>: <expression>", using the factory registered for name.
+// parseTrigger rebuilds a trigger from its persisted form "<name>: <expression>", using the trigger kind registered for name.
 func (s *Scheduler) parseTrigger(stored string) (trigger.Trigger, error) {
 	name, expr, found := strings.Cut(stored, triggerNameSeparator)
 	if !found {
 		return nil, fmt.Errorf("invalid trigger '%s': expected '<name>: <expression>'", stored)
 	}
 	name = strings.TrimSpace(name)
-	factory, ok := s.triggers[name]
+	parse, ok := s.triggers[name]
 	if !ok {
 		return nil, fmt.Errorf("%w: '%s'", ErrUnknownTrigger, name)
 	}
-	trg, err := factory(strings.TrimSpace(expr))
+	trg, err := parse(strings.TrimSpace(expr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build trigger '%s': %w", name, err)
 	}
@@ -206,26 +239,80 @@ func LoggerOption(logger *slog.Logger) SchedulerOption {
 	}
 }
 
-type ScheduleJobOptions struct {
+type RegisterExecuterOptions struct {
 	Backoff trigger.Backoff
+}
+
+type RegisterExecuterOption func(options *RegisterExecuterOptions)
+
+// WithBackoff sets the backoff used to retry the failed runs of the executer.
+// Defaults to trigger.NewExponentialBackoff(). A nil backoff means failed runs are not retried: the task is removed.
+func WithBackoff(backoff trigger.Backoff) RegisterExecuterOption {
+	return func(options *RegisterExecuterOptions) {
+		options.Backoff = backoff
+	}
+}
+
+// RegisterExecuter registers an executer under its Name().
+// Tasks reference their executer by name, which is persisted with each of them, so any number of jobs can share
+// the same executer, and every scheduler instance sharing the store must register the same executers before Start.
+//
+// ScheduleJob registers the executer it is given if it is not registered yet, so this is only needed to set
+// options (see WithBackoff), or for executers whose runs are all scheduled with ScheduleOnce, which refers to
+// the executer by name.
+// The name must not be empty (ErrInvalidExecuterName) and cannot be registered twice (ErrExecuterRegistered).
+//
+// This must be used before Start. A replica only runs the tasks of the executers it knows: the tasks of any other
+// executer are left in the store for the replicas that know it (e.g. during a rollout that adds an executer).
+// The tasks of an executer that no longer exists are never run; remove them with DeleteJob.
+func (s *Scheduler) RegisterExecuter(executer Executer, options ...RegisterExecuterOption) error {
+	if executer == nil {
+		return errors.New("failed to register executer: executer is nil")
+	}
+	name := executer.Name()
+	if s.running {
+		return fmt.Errorf("cannot register executer after scheduler has started: '%s'", name)
+	}
+	if name == "" {
+		return fmt.Errorf("failed to register executer '%s': %w", name, ErrInvalidExecuterName)
+	}
+
+	opts := RegisterExecuterOptions{
+		Backoff: trigger.NewExponentialBackoff(),
+	}
+	for _, o := range options {
+		o(&opts)
+	}
+	return s.registry.add(name, &registeredExecuter{
+		Executer: executer,
+		backoff:  opts.Backoff,
+	})
+}
+
+type ScheduleJobOptions struct {
+	Slug    string
 	When    time.Time
 	Payload []byte
 }
 
 type ScheduleJobOption func(options *ScheduleJobOptions)
 
-func WithBackoff(backoff trigger.Backoff) ScheduleJobOption {
+// WithSlug sets the slug that identifies the task in the store.
+// For ScheduleJob it defaults to the executer name, for ScheduleOnce to "<executer>:<uuid>".
+func WithSlug(slug string) ScheduleJobOption {
 	return func(options *ScheduleJobOptions) {
-		options.Backoff = backoff
+		options.Slug = slug
 	}
 }
 
+// WithDelay sets the first run time of the task to now plus delay.
 func WithDelay(delay time.Duration) ScheduleJobOption {
 	return func(options *ScheduleJobOptions) {
 		options.When = time.Now().Add(delay)
 	}
 }
 
+// WithWhen sets the first run time of the task.
 func WithWhen(when time.Time) ScheduleJobOption {
 	return func(options *ScheduleJobOptions) {
 		options.When = when
@@ -238,145 +325,169 @@ func WithPayload(payload []byte) ScheduleJobOption {
 	}
 }
 
-// ScheduleJob schedules a recurring job to be run.
+// ScheduleJob schedules a recurring job, run by the given executer.
+// The task is identified by its slug, which defaults to the executer name (see WithSlug), so several jobs
+// can be scheduled for the same executer by giving each its own slug.
+// The executer and the trigger kind are registered (see RegisterExecuter and RegisterTrigger) if they are not yet.
+// If an executer with the same name is already registered, that one runs the job and the given instance is only
+// used for its name. Since nothing can be registered after Start, this should be used before Start, unless both
+// are registered.
 //
-// The trigger persisted in the store always takes precedence: defaultTrigger is only used when the job
-// is not in the store yet, or was stored without a trigger expression. In both cases its expression is persisted.
+// The trigger persisted in the store always takes precedence: trg is only used when the job is not in the store yet,
+// in which case its expression is persisted along with the executer name, the payload and the first run time
+// (the next trigger time, see WithWhen and WithDelay). If the job is already stored, nothing is changed:
+// the stored trigger is validated and the stored executer must be the given one (ErrExecuterMismatch).
 // The stored expression is re-read on every execution, so changing it (see ChangeJobTrigger, or directly in the store)
-// updates the job schedule from its next run onwards, without changing the code.
-// If the stored expression is invalid, this fails. If it becomes invalid later, it is logged and defaultTrigger is used instead.
+// updates the job schedule from its next run onwards, without changing the code. If it becomes invalid later,
+// the job does not run: it is backed off until the expression is fixed.
 //
-// Triggers are persisted as "<name>: <expression>" and rebuilt with the factory registered for the name (see RegisterTrigger),
-// so a default trigger with an expression but no registered name fails with ErrUnknownTrigger.
-// The slug must not contain ':', which is reserved for the tasks of one-off jobs (ErrInvalidJobSlug).
-// This should be used before Start.
-func (s *Scheduler) ScheduleJob(ctx context.Context, slug string, executer Executer, defaultTrigger trigger.Trigger, options ...ScheduleJobOption) error {
-	if s.running {
-		return fmt.Errorf("cannot schedule job after scheduler has started job: '%s'", slug)
+// Triggers are persisted as "<name>: <expression>" and rebuilt by the trigger kind registered for the name,
+// so the trigger must have a non-empty Expression() (ErrTriggerNotPersistent).
+// Fails with ErrExecuterNotFound or ErrUnknownTrigger if the executer or the trigger kind is not registered and
+// the scheduler has started, and with ErrOneOffJob if the slug belongs to a one-off task.
+func (s *Scheduler) ScheduleJob(ctx context.Context, exec Executer, trg trigger.Trigger, options ...ScheduleJobOption) error {
+	if exec == nil {
+		return errors.New("failed to schedule job: executer is nil")
 	}
-	if strings.Contains(slug, oneOffSlugSeparator) {
-		return fmt.Errorf("failed to schedule job '%s': %w", slug, ErrInvalidJobSlug)
-	}
-	if defaultTrigger == nil {
-		return fmt.Errorf("failed to schedule job '%s': trigger is nil", slug)
-	}
-
-	// a trigger without expression is allowed as default, it just isn't persisted
-	expression, err := s.encodeTrigger(defaultTrigger)
-	if err != nil && !errors.Is(err, ErrTriggerNotPersistent) {
-		return fmt.Errorf("failed to schedule job '%s': %w", slug, err)
-	}
-
-	storedJob, err := s.store.Get(ctx, slug)
-	switch {
-	case errors.Is(err, ErrTaskNotFound):
-		// not stored yet, the default trigger will be used
-	case err != nil:
-		return fmt.Errorf("failed to load job '%s' from store: %w", slug, err)
-	case storedJob.Trigger != "":
-		// fail fast on an unusable stored trigger
-		if _, err := s.parseTrigger(storedJob.Trigger); err != nil {
-			return fmt.Errorf("failed to parse stored trigger for job '%s': %w", slug, err)
-		}
-	default:
-		// stored without a trigger: the default is used from now on, so persist it (keeping the run time)
-		if expression != "" {
-			if err := s.store.UpdateTrigger(ctx, slug, expression, storedJob.When); err != nil {
-				return fmt.Errorf("failed to persist default trigger for job '%s': %w", slug, err)
-			}
-		}
-	}
-
-	return s.scheduleJob(ctx, slug, &Job{
-		Executer:   executer,
-		Trigger:    defaultTrigger,
-		expression: expression,
-	}, options...)
-}
-
-func (s *Scheduler) scheduleJob(ctx context.Context, slug string, job *Job, options ...ScheduleJobOption) error {
+	executer := exec.Name()
 	opts := ScheduleJobOptions{
-		Backoff: trigger.NewExponentialBackoff(),
+		Slug: executer,
 	}
 	for _, o := range options {
 		o(&opts)
 	}
-	job.Backoff = opts.Backoff
+	slug := opts.Slug
 
-	if err := s.registry.add(slug, job); err != nil {
-		return fmt.Errorf("failed to register job: %w", err)
+	if err := s.ensureRegistered(exec); err != nil {
+		return fmt.Errorf("failed to schedule job '%s': %w", slug, err)
+	}
+	if trg == nil {
+		return fmt.Errorf("failed to schedule job '%s': trigger is nil", slug)
+	}
+	if err := s.ensureTriggerRegistered(trg); err != nil {
+		return fmt.Errorf("failed to schedule job '%s': %w", slug, err)
+	}
+	expression, err := s.encodeTrigger(trg)
+	if err != nil {
+		return fmt.Errorf("failed to schedule job '%s': %w", slug, err)
+	}
+
+	stored, err := s.store.Get(ctx, slug)
+	switch {
+	case errors.Is(err, ErrTaskNotFound):
+		// not stored yet, created below
+	case err != nil:
+		return fmt.Errorf("failed to load job '%s' from store: %w", slug, err)
+	default:
+		// the stored task wins, make sure it is usable
+		if stored.Executer != executer {
+			return fmt.Errorf("failed to schedule job '%s' for executer '%s': %w: '%s'", slug, executer, ErrExecuterMismatch, stored.Executer)
+		}
+		if stored.Trigger == "" {
+			return fmt.Errorf("failed to schedule job '%s': %w", slug, ErrOneOffJob)
+		}
+		if _, err := s.parseTrigger(stored.Trigger); err != nil {
+			return fmt.Errorf("failed to parse stored trigger for job '%s': %w", slug, err)
+		}
+		return nil
 	}
 
 	when := opts.When
 	if when.IsZero() {
-		when = job.Trigger.Next(time.Now())
+		when = trg.Next(time.Now())
+		if when.IsZero() {
+			return fmt.Errorf("failed to schedule job '%s': %w", slug, ErrTriggerFinished)
+		}
 	}
 
-	return s.createTask(ctx, &Task{
-		Slug:    slug,
-		Payload: opts.Payload,
-		When:    when,
-		Trigger: job.expression,
-	})
-}
+	defer s.pokeWaiters()
 
-func (s *Scheduler) createTask(ctx context.Context, st *Task) error {
-	if err := s.store.Create(ctx, st); err != nil && !errors.Is(err, ErrTaskAlreadyExists) {
-		return fmt.Errorf("failed to create task: %w", err)
+	err = s.store.Create(ctx, &Task{
+		Slug:     slug,
+		Executer: executer,
+		Payload:  opts.Payload,
+		When:     when,
+		Trigger:  expression,
+	})
+	if err != nil && !errors.Is(err, ErrTaskAlreadyExists) {
+		// already created by another instance in the meantime is fine
+		return fmt.Errorf("failed to create task '%s': %w", slug, err)
 	}
 
 	return nil
 }
 
-type RegisterJobOptions struct {
-	Backoff trigger.Backoff
-}
-
-type RegisterJobOption func(options *RegisterJobOptions)
-
-func WithJobBackoff(backoff trigger.Backoff) RegisterJobOption {
-	return func(options *RegisterJobOptions) {
-		options.Backoff = backoff
-	}
-}
-
-// RegisterOneOffJob registers a job whose runs are scheduled individually with ScheduleOneOffJob.
-// Each run executes once and is then removed: one-off jobs have no trigger and never recur.
-// Fails with ErrJobAlreadyRegistered if the job is already registered.
+// ScheduleOnce schedules a single run of the executer registered under the given name.
+// The task runs once, when set by WithWhen or WithDelay (immediately by default), and is then removed:
+// one-off tasks have no trigger and never recur.
+// The executer is identified by its name (see Executer.Name) because it must be registered already
+// (see RegisterExecuter), otherwise it fails with ErrExecuterNotFound: one-off runs are usually scheduled
+// after Start, when nothing can be registered any more, and every replica sharing the store must know the
+// executer to run the task.
 //
-// This should be used to register the jobs before starting the scheduler.
-func (s *Scheduler) RegisterOneOffJob(slug string, executer Executer, options ...RegisterJobOption) error {
-	if s.running {
-		return fmt.Errorf("cannot register one-off job after scheduler has started: '%s'", slug)
+// The slug of the task defaults to "<executer>:<uuid>", so each call schedules a new run; it is returned so that
+// it can be used with SuspendJob, ResumeJob, DeleteJob or GetScheduledJob. A slug given with WithSlug must not be
+// in use (ErrTaskAlreadyExists), which makes it possible to schedule a run at most once for a given key.
+func (s *Scheduler) ScheduleOnce(ctx context.Context, executer string, options ...ScheduleJobOption) (string, error) {
+	if executer == "" {
+		return "", fmt.Errorf("failed to schedule one-off task: %w", ErrInvalidExecuterName)
 	}
-	if strings.Contains(slug, oneOffSlugSeparator) {
-		return fmt.Errorf("failed to register one-off job '%s': %w", slug, ErrInvalidJobSlug)
-	}
-
-	opts := RegisterJobOptions{
-		Backoff: trigger.NewExponentialBackoff(),
+	opts := ScheduleJobOptions{
+		Slug: executer + oneOffSlugSeparator + uuid.NewString(),
+		When: time.Now(),
 	}
 	for _, o := range options {
 		o(&opts)
 	}
-	if err := s.registry.add(slug, &Job{
-		Executer: executer,
-		Backoff:  opts.Backoff,
-		OneOff:   true,
-	}); err != nil {
-		return fmt.Errorf("failed to register one-off job: %w", err)
+	slug := opts.Slug
+
+	if s.registry.get(executer) == nil {
+		return "", fmt.Errorf("failed to schedule one-off task '%s': %w: '%s'", slug, ErrExecuterNotFound, executer)
 	}
-	return nil
+
+	defer s.pokeWaiters()
+
+	err := s.store.Create(ctx, &Task{
+		Slug:     slug,
+		Executer: executer,
+		Payload:  opts.Payload,
+		When:     opts.When,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create one-off task '%s': %w", slug, err)
+	}
+
+	return slug, nil
 }
 
-// Start starts the scheduler
+// ensureRegistered registers the executer with the default options if no executer with its name is registered yet.
+// Fails with ErrExecuterNotFound if it is not registered and the scheduler has started, since it can no longer be.
+func (s *Scheduler) ensureRegistered(exec Executer) error {
+	name := exec.Name()
+	if s.registry.get(name) != nil {
+		return nil
+	}
+	if s.running {
+		return fmt.Errorf("%w: '%s' (executers cannot be registered after Start)", ErrExecuterNotFound, name)
+	}
+	err := s.RegisterExecuter(exec)
+	if errors.Is(err, ErrExecuterRegistered) {
+		// registered concurrently in the meantime
+		return nil
+	}
+	return err
+}
+
+// Start starts the scheduler.
 //
-// This should be called after registering all the jobs, either by calling RegisterJob or ScheduleJob.
+// This should be called after registering the triggers and the executers, and after scheduling the jobs:
+// nothing can be registered afterwards, so only known executers and trigger kinds can be scheduled then.
 func (s *Scheduler) Start(ctx context.Context, workers int) {
 	if s.running {
 		return
 	}
 	s.running = true
+	s.executers = s.registry.names()
 
 	if workers <= 0 {
 		workers = 1
@@ -400,46 +511,6 @@ func (s *Scheduler) pokeWaiters() {
 	}
 }
 
-type ScheduleOneOffJobOptions struct {
-	When    time.Time
-	Payload []byte
-}
-
-// ScheduleOneOffJob schedules a single run of a job previously registered with RegisterOneOffJob.
-//
-// slug is the slug used in RegisterOneOffJob. Each call creates a new scheduled job with
-// a unique slug of the form <slug>:<uuid>, which is returned so that it can be used with
-// SuspendJob, ResumeJob, DeleteJob or GetScheduledJob.
-func (s *Scheduler) ScheduleOneOffJob(ctx context.Context, slug string, when time.Time, payload []byte) (string, error) {
-	if !s.running {
-		return "", fmt.Errorf("cannot schedule one-off job before scheduler has started job: '%s'", slug)
-	}
-
-	if strings.Contains(slug, oneOffSlugSeparator) {
-		return "", fmt.Errorf("cannot schedule one-off job '%s': %w", slug, ErrInvalidJobSlug)
-	}
-	job := s.registry.get(slug)
-	if job == nil {
-		return "", fmt.Errorf("job not found: %s", slug)
-	}
-	if !job.OneOff {
-		return "", fmt.Errorf("job is not a one-off job: %s", slug)
-	}
-
-	defer s.pokeWaiters()
-
-	fullSlug := slug + oneOffSlugSeparator + uuid.NewString()
-	if err := s.createTask(ctx, &Task{
-		Slug:    fullSlug,
-		Payload: payload,
-		When:    when,
-	}); err != nil {
-		return "", err
-	}
-
-	return fullSlug, nil
-}
-
 // GetJobSlugs returns the slugs of all of the scheduled jobs.
 func (s *Scheduler) GetJobSlugs(ctx context.Context) ([]string, error) {
 	return s.store.GetSlugs(ctx)
@@ -447,19 +518,17 @@ func (s *Scheduler) GetJobSlugs(ctx context.Context) ([]string, error) {
 
 // GetScheduledJob get the scheduled job metadata
 func (s *Scheduler) GetScheduledJob(ctx context.Context, slug string) (*ScheduledJob, error) {
-	storedJob, err := s.store.Get(ctx, slug)
+	st, err := s.store.Get(ctx, slug)
 	if err != nil {
 		return nil, err
 	}
 
-	sj := &ScheduledJob{
-		NextRunTime: storedJob.When,
-		Suspended:   storedJob.Suspended,
-	}
-	if job := s.registry.get(baseSlug(storedJob.Slug)); job != nil {
-		sj.Executer = job.Executer
-	}
-	return sj, nil
+	return &ScheduledJob{
+		Executer:    st.Executer,
+		Trigger:     st.Trigger,
+		NextRunTime: st.When,
+		Suspended:   st.Suspended,
+	}, nil
 }
 
 // SuspendJob suspends the job, so that it will not run until it is resumed with ResumeJob.
@@ -476,7 +545,7 @@ func (s *Scheduler) SuspendJob(ctx context.Context, slug string) error {
 
 // ResumeJob resumes a suspended job. It does nothing if the job is not suspended.
 // If the next run time of the job is already in the past, it is recomputed from the job trigger,
-// so that the runs missed while suspended are not executed. A job without a trigger (one-off) keeps its
+// so that the runs missed while suspended are not executed. A task without a trigger (one-off) keeps its
 // run time and therefore runs right away.
 func (s *Scheduler) ResumeJob(ctx context.Context, slug string) error {
 	st, err := s.store.Get(ctx, slug)
@@ -489,7 +558,11 @@ func (s *Scheduler) ResumeJob(ctx context.Context, slug string) error {
 
 	when := st.When
 	if now := time.Now(); when.Before(now) {
-		if trg := s.triggerFor(st); trg != nil {
+		trg, err := s.resolveTrigger(st)
+		if err != nil {
+			s.logger.Warn("invalid stored trigger, keeping the run time", "slug", st.Slug, "trigger", st.Trigger, "error", err)
+		}
+		if trg != nil {
 			if next := trg.Next(now); !next.IsZero() {
 				when = next
 			}
@@ -513,15 +586,14 @@ func (s *Scheduler) ResumeJob(ctx context.Context, slug string) error {
 // computed with the previous trigger, so the new trigger only takes effect on the run after that one.
 //
 // The trigger must have a non-empty string expression (see trigger.Trigger.Expression), otherwise it fails with ErrTriggerNotPersistent,
-// and a factory must be registered for its name (see RegisterTrigger), otherwise it fails with ErrUnknownTrigger.
-// Fails with ErrOneOffJob for the task of a one-off job, since those never recur.
+// and its kind must be registered already (see RegisterTrigger), otherwise it fails with ErrUnknownTrigger: the change
+// is usually made after Start, when nothing can be registered any more, and every replica sharing the store must know
+// the kind to reschedule the job.
+// Fails with ErrOneOffJob for a one-off task, since those never recur.
 // Fails with ErrTaskNotFound if the job is not in the store.
 func (s *Scheduler) ChangeJobTrigger(ctx context.Context, slug string, trg trigger.Trigger) error {
 	if trg == nil {
 		return fmt.Errorf("cannot change trigger of job '%s': trigger is nil", slug)
-	}
-	if isOneOffSlug(slug) {
-		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrOneOffJob)
 	}
 	expr, err := s.encodeTrigger(trg)
 	if err != nil {
@@ -532,43 +604,20 @@ func (s *Scheduler) ChangeJobTrigger(ctx context.Context, slug string, trg trigg
 		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrTriggerFinished)
 	}
 
+	st, err := s.store.Get(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if st.Trigger == "" {
+		return fmt.Errorf("cannot change trigger of job '%s': %w", slug, ErrOneOffJob)
+	}
+
 	if err := s.store.UpdateTrigger(ctx, slug, expr, when); err != nil {
 		return err
 	}
 	s.pokeWaiters()
 
 	return nil
-}
-
-// triggerFor returns the trigger of the task, or nil if it has none.
-// It honours the same precedence as the execution: the stored expression, otherwise the registered trigger.
-// If the job is not registered in this instance, only the stored expression can be used.
-func (s *Scheduler) triggerFor(st *Task) trigger.Trigger {
-	job := s.registry.get(baseSlug(st.Slug))
-	if job != nil {
-		return s.resolveTrigger(*job, st)
-	}
-	if isOneOffSlug(st.Slug) || st.Trigger == "" {
-		return nil
-	}
-	trg, err := s.parseTrigger(st.Trigger)
-	if err != nil {
-		s.logger.Warn("invalid stored trigger", "slug", st.Slug, "trigger", st.Trigger, "error", err)
-		return nil
-	}
-	return trg
-}
-
-// baseSlug returns the registry slug of a task: one-off tasks are stored as <job-name>:<uuid>.
-func baseSlug(slug string) string {
-	base, _, _ := strings.Cut(slug, oneOffSlugSeparator)
-	return base
-}
-
-// isOneOffSlug reports whether the slug is the one of a one-off task.
-// Only those contain the separator, since it is rejected in job slugs.
-func isOneOffSlug(slug string) bool {
-	return strings.Contains(slug, oneOffSlugSeparator)
 }
 
 // DeleteJob remove the job from the execution queue
@@ -645,7 +694,7 @@ func stopTimer(t *time.Timer) {
 // If there is no job, the returned job is nil and the wait is the heartbeat.
 // A negative wait means wait indefinitely (no job and no heartbeat).
 func (s *Scheduler) calculateNextRun(ctx context.Context) (*Task, time.Duration, error) {
-	job, err := s.store.NextRun(ctx)
+	job, err := s.store.NextRun(ctx, s.executers)
 	if errors.Is(err, ErrTaskNotFound) {
 		if s.heartbeat > 0 {
 			return nil, s.heartbeat, nil
@@ -668,18 +717,18 @@ func (s *Scheduler) calculateNextRun(ctx context.Context) (*Task, time.Duration,
 }
 
 func (s *Scheduler) executeAndReschedule(ctx context.Context, st *Task) error {
+	// the store only returns the tasks of the registered executers, so this cannot fail unless the store is broken.
+	// The task is left alone, since it may belong to a replica that knows the executer.
+	exec := s.registry.get(st.Executer)
+	if exec == nil {
+		return fmt.Errorf("task '%s' has no executer registered: '%s' (the store must only return the tasks of the executers it is given)", st.Slug, st.Executer)
+	}
+
 	defer s.pokeWaiters()
 
 	st, err := s.store.Lock(ctx, st)
 	if err != nil {
 		return err
-	}
-
-	slug := baseSlug(st.Slug)
-	job := s.registry.get(slug)
-	if job == nil {
-		s.logger.Info("job not found in registry, removing from store", "slug", st.Slug)
-		return s.store.Delete(ctx, st.Slug)
 	}
 
 	go func() {
@@ -688,7 +737,7 @@ func (s *Scheduler) executeAndReschedule(ctx context.Context, st *Task) error {
 		defer s.pokeWaiters()
 
 		slug := st.Slug
-		st2 := s.executeJob(ctx, *job, st)
+		st2 := s.executeJob(ctx, exec, st)
 		if st2 == nil || st2.When.IsZero() {
 			s.logger.Info("job signaled to be removed, deleting job", "slug", slug)
 			err := s.store.Delete(ctx, slug)
@@ -707,29 +756,20 @@ func (s *Scheduler) executeAndReschedule(ctx context.Context, st *Task) error {
 	return nil
 }
 
-func (s *Scheduler) executeJob(ctx context.Context, job Job, task *Task) *Task {
-	// execute the Executer
-	task2, err := job.Executer.Execute(ctx, task)
+// executeJob runs the task and returns it updated for its next run, or nil if it must be removed.
+func (s *Scheduler) executeJob(ctx context.Context, exec *registeredExecuter, task *Task) *Task {
+	// make sure the task can be rescheduled before running it: a run that could not be rescheduled
+	// would be lost, or would repeat at the backoff pace instead of its intended one
+	trg, err := s.resolveTrigger(task)
+	if err != nil {
+		s.logger.Error("invalid stored trigger, the task will not run until it is fixed", "slug", task.Slug, "trigger", task.Trigger, "error", err)
+		return s.backoff(exec, task, err)
+	}
+
+	task2, err := exec.Execute(ctx, task)
 	if err != nil {
 		s.logger.Error("failed to execute job", "slug", task.Slug, "error", err)
-		if job.Backoff == nil {
-			s.logger.Warn("no retry configured for job", "slug", task.Slug)
-			return nil
-		}
-
-		task.Result = err.Error()
-		task.Retry++
-
-		when, errRetry := job.Backoff.NextRetryTime(task.When, task.Retry)
-		if errRetry != nil {
-			// no more attempts will be made
-			s.logger.Info("no more retries for job", "slug", task.Slug, "retry", task.Retry, "error", errRetry)
-			return nil
-		}
-
-		s.logger.Warn("backing off job", "slug", task.Slug, "retry", task.Retry, "when", when, "error", err)
-		task.When = when
-		return task
+		return s.backoff(exec, task, err)
 	}
 
 	if task2 == nil {
@@ -737,14 +777,15 @@ func (s *Scheduler) executeJob(ctx context.Context, job Job, task *Task) *Task {
 	}
 
 	task2.Retry = 0
+	// the identity of the task is not the job's responsibility to carry
+	task2.Slug = task.Slug
+	task2.Executer = task.Executer
 	if task2.Trigger == "" {
-		// keep the stored trigger expression, the job is not responsible for carrying it
+		// keep the stored trigger expression
 		task2.Trigger = task.Trigger
 	}
-	// reschedule the job
-	trg := s.resolveTrigger(job, task)
 	if trg == nil {
-		// will cause this to be removed from the job queue
+		// one-off task: will cause this to be removed from the job queue
 		return nil
 	}
 	task2.When = trg.Next(task2.When)
@@ -756,28 +797,35 @@ func (s *Scheduler) executeJob(ctx context.Context, job Job, task *Task) *Task {
 	return task2
 }
 
-// resolveTrigger returns the trigger to use to reschedule the job, or nil if it must not run again.
-// The stored expression (as read when the job was locked) takes precedence over the registered one,
-// so changes in the store are honoured on every run. One-off jobs never recur.
-func (s *Scheduler) resolveTrigger(job Job, task *Task) trigger.Trigger {
-	if job.OneOff {
+// backoff returns the task scheduled for a retry after cause, or nil if it must not be retried.
+func (s *Scheduler) backoff(exec *registeredExecuter, task *Task, cause error) *Task {
+	if exec.backoff == nil {
+		s.logger.Warn("no retry configured for job", "slug", task.Slug)
 		return nil
 	}
-	if task.Trigger == "" {
-		return job.Trigger
-	}
-	if task.Trigger == job.expression {
-		// the stored expression is the one already registered, no need to parse it again
-		return job.Trigger
-	}
 
-	trg, err := s.parseTrigger(task.Trigger)
+	task.Result = cause.Error()
+	task.Retry++
+
+	when, err := exec.backoff.NextRetryTime(task.When, task.Retry)
 	if err != nil {
-		s.logger.Warn("invalid stored trigger, using the registered trigger", "slug", task.Slug, "trigger", task.Trigger, "error", err)
-		return job.Trigger
+		// no more attempts will be made
+		s.logger.Info("no more retries for job", "slug", task.Slug, "retry", task.Retry, "error", err)
+		return nil
 	}
 
-	return trg
+	s.logger.Warn("backing off job", "slug", task.Slug, "retry", task.Retry, "when", when, "error", cause)
+	task.When = when
+	return task
+}
+
+// resolveTrigger rebuilds the trigger persisted with the task, or returns nil if it has none (one-off task).
+// The stored expression is read on every run, so changes in the store are honoured.
+func (s *Scheduler) resolveTrigger(task *Task) (trigger.Trigger, error) {
+	if task.Trigger == "" {
+		return nil, nil
+	}
+	return s.parseTrigger(task.Trigger)
 }
 
 func parkTime(ts time.Time) time.Duration {

@@ -22,6 +22,7 @@ const (
 // The job slug is used as the document id, which makes it unique.
 type Entry struct {
 	Slug        string     `bson:"_id"`
+	Executer    string     `bson:"executer"`
 	Payload     []byte     `bson:"payload,omitempty"`
 	When        time.Time  `bson:"run_at"`
 	Version     int64      `bson:"version"`
@@ -35,6 +36,7 @@ type Entry struct {
 func toEntry(t *scheduler.Task) *Entry {
 	return &Entry{
 		Slug:      t.Slug,
+		Executer:  t.Executer,
 		Payload:   t.Payload,
 		When:      t.When.UTC(),
 		Version:   t.Version,
@@ -51,6 +53,7 @@ func fromEntry(e *Entry) *scheduler.Task {
 	}
 	return &scheduler.Task{
 		Slug:      e.Slug,
+		Executer:  e.Executer,
 		Payload:   e.Payload,
 		When:      e.When.UTC(),
 		Version:   e.Version,
@@ -117,11 +120,13 @@ func (s *Store) CreateSchema(ctx context.Context) error {
 	}
 
 	_, err = s.collection().Indexes().CreateOne(ctx, mongo.IndexModel{
+		// equality (executer), sort (run_at), range (locked_until): the order NextRun needs
 		Keys: bson.D{
+			{Key: "executer", Value: 1},
 			{Key: "run_at", Value: 1},
 			{Key: "locked_until", Value: 1},
 		},
-		Options: options.Index().SetName("sch_run_at_lock_idx"),
+		Options: options.Index().SetName("sch_executer_run_at_lock_idx"),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create indexes on '%s': %w", s.collectionName, err)
@@ -143,13 +148,17 @@ func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
 	return fmt.Errorf("failed to schedule '%s': %w", job.Slug, err)
 }
 
-// NextRun returns the next available run
-func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
+// NextRun returns the next available run of the given executers
+func (s *Store) NextRun(ctx context.Context, executers []string) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 	entry := &Entry{}
+	if executers == nil {
+		// "$in" requires an array, nil would be encoded as null
+		executers = []string{}
+	}
 	err := s.collection().FindOne(
 		ctx,
-		runnableFilter(now),
+		append(runnableFilter(now), bson.E{Key: "executer", Value: bson.D{{Key: "$in", Value: executers}}}),
 		options.FindOne().SetSort(bson.D{{Key: "run_at", Value: 1}}),
 	).Decode(entry)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -186,7 +195,7 @@ func (s *Store) Lock(ctx context.Context, job *scheduler.Task) (*scheduler.Task,
 
 func (s *Store) Reschedule(ctx context.Context, job *scheduler.Task) error {
 	entry := toEntry(job)
-	// the trigger expression is owned by the store and may have been edited there, so it is not updated
+	// the executer and the trigger expression are owned by the store (the latter may have been edited there), so they are not updated
 	res, err := s.collection().UpdateOne(
 		ctx,
 		bson.D{{Key: "_id", Value: entry.Slug}, {Key: "version", Value: entry.Version}},

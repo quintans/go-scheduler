@@ -20,11 +20,12 @@ const (
 
 const (
 	defaultLockDuration = 5 * time.Minute
-	selectColumns       = "slug, payload, run_at, version, retry, result, trigger_expr, suspended"
+	selectColumns       = "slug, executer, payload, run_at, version, retry, result, trigger_expr, suspended"
 )
 
 type Entry struct {
 	Slug      string    `db:"slug"`
+	Executer  string    `db:"executer"`
 	Payload   []byte    `db:"payload"`
 	When      time.Time `db:"run_at"`
 	Version   int64     `db:"version"`
@@ -37,6 +38,7 @@ type Entry struct {
 func toEntry(t *scheduler.Task) *Entry {
 	return &Entry{
 		Slug:      t.Slug,
+		Executer:  t.Executer,
 		Payload:   t.Payload,
 		When:      t.When.UTC(),
 		Version:   t.Version,
@@ -53,6 +55,7 @@ func fromEntry(e *Entry) *scheduler.Task {
 	}
 	return &scheduler.Task{
 		Slug:      e.Slug,
+		Executer:  e.Executer,
 		Payload:   e.Payload,
 		When:      e.When.UTC(),
 		Version:   e.Version,
@@ -98,6 +101,7 @@ func New(db *sql.DB, options ...StoreOption) *Store {
 // The table has the following columns:
 //
 //	slug         TEXT PRIMARY KEY
+//	executer     TEXT NOT NULL
 //	payload      BYTEA
 //	run_at       TIMESTAMP NOT NULL
 //	version      INTEGER NOT NULL
@@ -109,6 +113,7 @@ func New(db *sql.DB, options ...StoreOption) *Store {
 func (s *Store) CreateSchema(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %[1]s (
 		slug TEXT PRIMARY KEY,
+		executer TEXT NOT NULL,
 		payload BYTEA,
 		run_at TIMESTAMP NOT NULL,
 		version INTEGER NOT NULL,
@@ -118,7 +123,7 @@ func (s *Store) CreateSchema(ctx context.Context) error {
 		suspended BOOLEAN NOT NULL DEFAULT FALSE,
 		locked_until TIMESTAMP
 	);
-	CREATE INDEX IF NOT EXISTS %[1]s_run_at_lock_idx ON %[1]s (run_at, locked_until);`, s.tableName))
+	CREATE INDEX IF NOT EXISTS %[1]s_executer_run_at_lock_idx ON %[1]s (executer, run_at, locked_until);`, s.tableName))
 	if err != nil {
 		return fmt.Errorf("failed to create schema for table '%s': %w", s.tableName, err)
 	}
@@ -129,8 +134,8 @@ func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
 	entry := toEntry(job)
 	_, err := s.db.NamedExecContext(
 		ctx,
-		fmt.Sprintf(`INSERT INTO %s (slug, payload, run_at, version, retry, result, trigger_expr, suspended, locked_until)
-		VALUES (:slug, :payload, :run_at, :version, :retry, :result, :trigger_expr, :suspended, NULL)`, s.tableName),
+		fmt.Sprintf(`INSERT INTO %s (slug, executer, payload, run_at, version, retry, result, trigger_expr, suspended, locked_until)
+		VALUES (:slug, :executer, :payload, :run_at, :version, :retry, :result, :trigger_expr, :suspended, NULL)`, s.tableName),
 		entry,
 	)
 	if err == nil {
@@ -144,15 +149,15 @@ func (s *Store) Create(ctx context.Context, job *scheduler.Task) error {
 	return fmt.Errorf("failed to schedule job: %w", err)
 }
 
-// NextRun returns the next available run
-func (s *Store) NextRun(ctx context.Context) (*scheduler.Task, error) {
+// NextRun returns the next available run of the given executers
+func (s *Store) NextRun(ctx context.Context, executers []string) (*scheduler.Task, error) {
 	now := time.Now().UTC()
 	entry := &Entry{}
 	err := s.db.GetContext(ctx, entry, fmt.Sprintf(`SELECT %s FROM %s
-	WHERE (locked_until IS NULL OR locked_until < $1) AND NOT suspended
+	WHERE (locked_until IS NULL OR locked_until < $1) AND NOT suspended AND executer = ANY($2)
 	ORDER BY run_at
 	ASC LIMIT 1`,
-		selectColumns, s.tableName), now)
+		selectColumns, s.tableName), now, pq.Array(executers))
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, scheduler.ErrTaskNotFound

@@ -27,7 +27,12 @@ func NewCronTrigger(expr string) (*CronTrigger, error) {
 	return &CronTrigger{expr: expr, schedule: schedule}, nil
 }
 
-// ParseCronTrigger is the factory of CronTrigger.
+// Parse builds a CronTrigger from a cron expression.
+func (ct *CronTrigger) Parse(expr string) (Trigger, error) {
+	return ParseCronTrigger(expr)
+}
+
+// ParseCronTrigger builds a CronTrigger from a cron expression.
 func ParseCronTrigger(expr string) (Trigger, error) {
 	return NewCronTrigger(expr)
 }

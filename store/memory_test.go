@@ -20,4 +20,7 @@ func TestMemStore(t *testing.T) {
 	t.Run("memory update trigger", func(t *testing.T) {
 		testStoreUpdateTrigger(t, store)
 	})
+	t.Run("memory next run by executer", func(t *testing.T) {
+		testStoreNextRunByExecuter(t, store)
+	})
 }

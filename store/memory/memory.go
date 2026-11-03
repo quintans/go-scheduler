@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -49,21 +50,30 @@ func (s *MemStore) Create(_ context.Context, job *scheduler.Task) error {
 	return nil
 }
 
-func (s *MemStore) NextRun(context.Context) (*scheduler.Task, error) {
+func (s *MemStore) NextRun(_ context.Context, executers []string) (*scheduler.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// suspended entries are kept at the end of the queue, so if the head is suspended there is nothing to run
-	if s.queue.Len() == 0 || s.queue.Head().Suspended {
+	// the head of the queue is the next runnable entry, but it may belong to an executer that is not wanted,
+	// so the queue is scanned for the earliest runnable entry of the given executers
+	var next *MemEntry
+	for _, entry := range *s.queue {
+		if entry.Suspended || !slices.Contains(executers, entry.Executer) {
+			continue
+		}
+		if next == nil || entry.When.Before(next.When) {
+			next = entry
+		}
+	}
+	if next == nil {
 		return nil, scheduler.ErrTaskNotFound
 	}
 
-	head := s.queue.Head()
-
 	return &scheduler.Task{
-		Slug:    head.Slug,
-		When:    head.When,
-		Version: head.Version,
+		Slug:     next.Slug,
+		Executer: next.Executer,
+		When:     next.When,
+		Version:  next.Version,
 	}, nil
 }
 
@@ -75,14 +85,14 @@ func (s *MemStore) Lock(_ context.Context, job *scheduler.Task) (*scheduler.Task
 		return nil, scheduler.ErrTaskNotFound
 	}
 
-	// Lock by popping.
-	// Since this is in memory, we assume that this is being called when the timer has expired.
-	// The head must still be the job found by NextRun: it may have been suspended, resumed or deleted in the meantime.
-	head := s.queue.Head()
-	if head.Suspended || head.Slug != job.Slug || head.Version != job.Version {
+	// Lock by removing from the queue.
+	// The job found by NextRun must still be queued as it was: it may have been suspended, run by another worker,
+	// or deleted in the meantime.
+	entry, queued := s.find(job.Slug)
+	if entry == nil || !queued || entry.Suspended || entry.Version != job.Version {
 		return nil, scheduler.ErrTaskNotLocked
 	}
-	entry := heap.Pop(s.queue).(*MemEntry)
+	s.queue.Remove(entry.index)
 	s.locked[entry.Slug] = entry
 
 	// hand out a copy, so that changes made to the stored task while it runs (suspend, resume) do not race with the job
@@ -98,7 +108,8 @@ func (s *MemStore) Reschedule(ctx context.Context, job *scheduler.Task) error {
 	if ok {
 		delete(s.locked, job.Slug)
 		job.Version++
-		// the suspension and the trigger expression are owned by the store and may have changed while the job was running
+		// the executer, the suspension and the trigger expression are owned by the store and may have changed while the job was running
+		job.Executer = entry.Executer
 		job.Suspended = entry.Suspended
 		job.Trigger = entry.Trigger
 		entry.Task = job

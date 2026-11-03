@@ -36,6 +36,9 @@ func TestFireStore(t *testing.T) {
 	t.Run("firestore update trigger", func(t *testing.T) {
 		testStoreUpdateTrigger(t, store)
 	})
+	t.Run("firestore next run by executer", func(t *testing.T) {
+		testStoreNextRunByExecuter(t, store)
+	})
 }
 
 type FireConfig struct {

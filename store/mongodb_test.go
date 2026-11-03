@@ -39,6 +39,9 @@ func TestMongoStore(t *testing.T) {
 	t.Run("mongodb update trigger", func(t *testing.T) {
 		testStoreUpdateTrigger(t, store)
 	})
+	t.Run("mongodb next run by executer", func(t *testing.T) {
+		testStoreNextRunByExecuter(t, store)
+	})
 }
 
 func mongoSetup() (string, func(), error) {
